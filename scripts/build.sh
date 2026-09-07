@@ -200,6 +200,67 @@ BUNDLEPOM
         echo "  INJECTED: ${BUNDLE_NAME}"
     done
 
+    # 额外下载官方包中缺失的第三方 bundle (来自 Eclipse Orbit / Maven Central)
+    # 某些依赖 (如 com.jcraft.jzlib) 不在 DBeaver 官方二进制包中, 需单独下载
+    # 格式: "bundle-name|maven-group|maven-artifact|version|export-package"
+    EXTRA_BUNDLES=(
+        "com.jcraft.jzlib|com.jcraft|jzlib|1.0.7|com.jcraft.jzlib"
+    )
+
+    for spec in "${EXTRA_BUNDLES[@]}"; do
+        IFS='|' read -r EXTRA_NAME EXTRA_GROUP EXTRA_ARTIFACT EXTRA_VERSION EXTRA_EXPORT <<< "${spec}"
+
+        TARGET_DIR="${SRC_DIR}/plugins/${EXTRA_NAME}"
+        if [ -d "${TARGET_DIR}" ]; then
+            echo "  SKIP: ${EXTRA_NAME} already exists"
+            continue
+        fi
+
+        MAVEN_PATH="${EXTRA_GROUP//.//}/${EXTRA_ARTIFACT}/${EXTRA_VERSION}/${EXTRA_ARTIFACT}-${EXTRA_VERSION}.jar"
+        JAR_URL="https://repo1.maven.org/maven2/${MAVEN_PATH}"
+        TMP_JAR="${WORK_DIR}/${EXTRA_NAME}-${EXTRA_VERSION}.jar"
+
+        echo "  Downloading ${EXTRA_NAME} ${EXTRA_VERSION} from Maven Central..."
+        if curl -fL --retry 3 --retry-delay 5 --retry-connrefused -o "${TMP_JAR}" "${JAR_URL}"; then
+            mkdir -p "${TARGET_DIR}"
+            (cd "${TARGET_DIR}" && jar -xf "${TMP_JAR}")
+
+            # Maven Central 的 jar 通常没有 OSGi 元数据, 手动添加 manifest
+            mkdir -p "${TARGET_DIR}/META-INF"
+            cat > "${TARGET_DIR}/META-INF/MANIFEST.MF" <<EXTRAMANIFEST
+Manifest-Version: 1.0
+Bundle-ManifestVersion: 2
+Bundle-Name: ${EXTRA_NAME}
+Bundle-SymbolicName: ${EXTRA_NAME}
+Bundle-Version: ${EXTRA_VERSION}
+Export-Package: ${EXTRA_EXPORT};version="${EXTRA_VERSION}"
+EXTRAMANIFEST
+
+            cat > "${TARGET_DIR}/pom.xml" <<EXTRAPOM
+<?xml version="1.0" encoding="UTF-8"?>
+<project xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"
+  xmlns="http://maven.apache.org/POM/4.0.0"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.jkiss.dbeaver</groupId>
+    <artifactId>dbeaver</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../../</relativePath>
+  </parent>
+  <artifactId>${EXTRA_NAME}</artifactId>
+  <packaging>eclipse-plugin</packaging>
+</project>
+EXTRAPOM
+
+            NEW_MODULES="${NEW_MODULES} ${EXTRA_NAME}"
+            INJECTED_COUNT=$((INJECTED_COUNT + 1))
+            echo "  INJECTED: ${EXTRA_NAME} ${EXTRA_VERSION}"
+        else
+            echo "  WARN: Failed to download ${EXTRA_NAME} from ${JAR_URL}"
+        fi
+    done
+
     echo "  Total injected: ${INJECTED_COUNT} third-party bundles"
 
     # 将新模块添加到 plugins/pom.xml 的默认 modules 段 (第一个 </modules> 之前)
