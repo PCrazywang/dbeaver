@@ -104,7 +104,18 @@ else:
         print("[PATCH] Replaced environments via regex -> Linux x86_64 + aarch64")
     else:
         print("[WARN] Could not find environments block, keeping original")
-        sys.exit(0)
+
+# 替换已失效的 DBeaver p2 仓库地址
+# 21.0.0 时代的 https://dbeaver.io/eclipse-repo 已被官方下线
+# 替代方案: 使用 dbeaver-deps-ce 构建的版本化 p2仓库
+# 注意: 23.2.5 的依赖版本比 21.0.0 新, 但第三方库通常向后兼容
+OLD_P2_REPO = "https://dbeaver.io/eclipse-repo"
+NEW_P2_REPO = "https://repo.dbeaver.net/p2/ce/23.2.5/"
+if OLD_P2_REPO in content:
+    content = content.replace(OLD_P2_REPO, NEW_P2_REPO)
+    print("[PATCH] Replaced p2 repo URL: {} -> {}".format(OLD_P2_REPO, NEW_P2_REPO))
+else:
+    print("[WARN] Could not find old p2 repo URL: {}".format(OLD_P2_REPO))
 
 with open("pom.xml", "w", encoding="utf-8") as f:
     f.write(content)
