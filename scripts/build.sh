@@ -159,6 +159,15 @@ else
             continue
         fi
 
+        # 白名单: 只注入 DBeaver 特有的、不在 Eclipse 2020-12 p2 仓库中的第三方库
+        # Eclipse/Orbit 通用库 (org.eclipse.*, org.apache.*, com.jcraft.*, com.google.gson.* 等)
+        # 应从 Eclipse p2 仓库获取, 从官方包注入会引入传递依赖问题
+        # (如 commons-logging -> avalon.framework.logger, jsch -> jzlib)
+        INJECT_WHITELIST="net\.sf\.opencsv|com\.github\.jsqlparser|org\.jkiss\.utils"
+        if ! echo "${JAR_NAME}" | grep -qE "^(${INJECT_WHITELIST})"; then
+            continue
+        fi
+
         # 从 jar 文件名提取 bundle 名称: 第一个 _数字. 之前的部分
         # 例如 net.sf.opencsv_2.3.0.jar -> net.sf.opencsv
         BUNDLE_NAME=$(echo "${JAR_NAME}" | sed -E 's/^(.+?)_[0-9]+\..*\.jar$/\1/')
@@ -201,10 +210,11 @@ BUNDLEPOM
     done
 
     # 额外下载官方包中缺失的第三方 bundle (来自 Eclipse Orbit / Maven Central)
-    # 某些依赖 (如 com.jcraft.jzlib) 不在 DBeaver 官方二进制包中, 需单独下载
+    # 某些 DBeaver 特有依赖可能不在官方二进制包中, 需单独从 Maven Central 下载
     # 格式: "bundle-name|maven-group|maven-artifact|version|export-package"
+    # 示例: "com.example.lib|com.example|example-lib|1.0.0|com.example.lib"
     EXTRA_BUNDLES=(
-        "com.jcraft.jzlib|com.jcraft|jzlib|1.0.7|com.jcraft.jzlib"
+        # 目前无需额外下载; Eclipse/Orbit 通用库已改为从 p2 仓库获取
     )
 
     for spec in "${EXTRA_BUNDLES[@]}"; do
