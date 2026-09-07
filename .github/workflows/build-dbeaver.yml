@@ -1,0 +1,283 @@
+name: Build DBeaver 21.0.0 (Multi-Arch)
+
+# =============================================================================
+# DBeaver 21.0.0 多架构 CI 构建工作流
+# 目标系统: UOS 20 (Debian 10 系) / Ubuntu 18.04+ / Debian 10+
+# 支持架构: amd64 (x86_64) / arm64 (aarch64)
+# 特性:
+#   - 手动触发时可启用 SSH 调试 (tmate)
+#   - 可选构建单架构或双架构
+#   - 构建完成自动打包 .deb
+#   - 可选远程部署到目标机器
+# =============================================================================
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/**'
+      - 'debian/**'
+      - 'patches/**'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      ssh_debug:
+        description: '启用 SSH 调试 (tmate) - 构建前暂停等待 SSH 接入'
+        type: boolean
+        default: false
+        required: false
+      architectures:
+        description: '目标架构'
+        type: choice
+        options:
+          - 'both (amd64 + arm64)'
+          - 'amd64 only'
+          - 'arm64 only'
+        default: 'both (amd64 + arm64)'
+        required: false
+      skip_tests:
+        description: '跳过测试'
+        type: boolean
+        default: true
+        required: false
+      deploy_enabled:
+        description: '构建完成后远程部署 (需配置 Secrets)'
+        type: boolean
+        default: false
+        required: false
+
+env:
+  DBEAVER_VERSION: '21.0.0'
+  JAVA_VERSION: '11'
+  MAVEN_OPTS: '-Xmx3g -XX:+UseG1GC -XX:MaxMetaspaceSize=512m'
+
+jobs:
+  # ===========================================================================
+  # 构建 Job - 单次构建产出双架构 (Tycho cross-build)
+  # ===========================================================================
+  build:
+    name: Build DBeaver ${{ env.DBEAVER_VERSION }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 0. 基础准备
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'maven'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            dpkg-dev \
+            fakeroot \
+            file \
+            tar \
+            gzip \
+            python3 \
+            git
+          echo "--- Versions ---"
+          java -version
+          mvn -version
+          dpkg-deb --version
+
+      - name: Prepare output directories
+        run: |
+          mkdir -p "${{ github.workspace }}/output"
+          mkdir -p "${{ github.workspace }}/build"
+
+      # -----------------------------------------------------------------------
+      # 1. SSH 调试 (可选) - 使用 tmate 在构建前暂停
+      # -----------------------------------------------------------------------
+      - name: Setup SSH debug session (tmate)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ssh_debug == 'true' }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+          install-dependencies: true
+        timeout-minutes: 60
+
+      # -----------------------------------------------------------------------
+      # 2. 执行构建脚本
+      # -----------------------------------------------------------------------
+      - name: Build DBeaver (Maven + Tycho)
+        id: build
+        run: |
+          chmod +x "${{ github.workspace }}/scripts/build.sh"
+          export WORK_DIR="${{ github.workspace }}/build"
+          export OUTPUT_DIR="${{ github.workspace }}/output"
+          export DBEAVER_VERSION="${{ env.DBEAVER_VERSION }}"
+          export SKIP_TESTS="${{ github.event.inputs.skip_tests || 'true' }}"
+          bash "${{ github.workspace }}/scripts/build.sh"
+
+      - name: List build artifacts
+        run: |
+          echo "=== Output directory ==="
+          ls -lh "${{ github.workspace }}/output/" || true
+          echo ""
+          echo "=== Build products dir ==="
+          find "${{ github.workspace }}/build/dbeaver-src/product/standalone/target/products" -maxdepth 4 -type d 2>/dev/null || true
+
+      # -----------------------------------------------------------------------
+      # 3. 打包 .deb (按架构分别打包)
+      # -----------------------------------------------------------------------
+      - name: Package amd64 .deb
+        if: ${{ github.event.inputs.architectures != 'arm64 only' }}
+        run: |
+          chmod +x "${{ github.workspace }}/scripts/package-deb.sh"
+          TARBALL="${{ github.workspace }}/output/dbeaver-ce-${{ env.DBEAVER_VERSION }}-linux-gtk-x86_64.tar.gz"
+          if [ -f "${TARBALL}" ]; then
+            bash "${{ github.workspace }}/scripts/package-deb.sh" "${TARBALL}" "${{ github.workspace }}/output"
+          else
+            echo "::warning::amd64 tarball not found, skipping deb packaging"
+            ls -la "${{ github.workspace }}/output/"
+          fi
+
+      - name: Package arm64 .deb
+        if: ${{ github.event.inputs.architectures != 'amd64 only' }}
+        run: |
+          chmod +x "${{ github.workspace }}/scripts/package-deb.sh"
+          TARBALL="${{ github.workspace }}/output/dbeaver-ce-${{ env.DBEAVER_VERSION }}-linux-gtk-aarch64.tar.gz"
+          if [ -f "${TARBALL}" ]; then
+            bash "${{ github.workspace }}/scripts/package-deb.sh" "${TARBALL}" "${{ github.workspace }}/output"
+          else
+            echo "::warning::arm64 tarball not found, skipping deb packaging"
+            ls -la "${{ github.workspace }}/output/"
+          fi
+
+      - name: Verify .deb packages
+        run: |
+          echo "=== Final artifacts ==="
+          ls -lh "${{ github.workspace }}/output/"*.deb 2>/dev/null || echo "(no .deb files)"
+          echo ""
+          for deb in "${{ github.workspace }}/output/"*.deb; do
+            if [ -f "${deb}" ]; then
+              echo "--- $(basename "${deb}") ---"
+              dpkg-deb --info "${deb}" 2>/dev/null | head -20
+              echo ""
+            fi
+          done
+
+      # -----------------------------------------------------------------------
+      # 4. 上传构建产物
+      # -----------------------------------------------------------------------
+      - name: Upload .deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbeaver-ce-${{ env.DBEAVER_VERSION }}-deb-packages
+          path: |
+            ${{ github.workspace }}/output/*.deb
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload tar.gz artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbeaver-ce-${{ env.DBEAVER_VERSION }}-tarballs
+          path: |
+            ${{ github.workspace }}/output/*.tar.gz
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload build logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_id }}
+          path: |
+            ${{ github.workspace }}/build/dbeaver-src/**/*.log
+            ${{ github.workspace }}/build/dbeaver-src/**/target/*.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # -----------------------------------------------------------------------
+      # 5. 可选: 远程部署
+      # -----------------------------------------------------------------------
+      - name: Deploy to remote host (optional)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_enabled == 'true' }}
+        env:
+          SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -z "${SSH_HOST}" ]; then
+            echo "::error::Deploy enabled but DEPLOY_SSH_HOST secret not configured"
+            exit 1
+          fi
+          chmod +x "${{ github.workspace }}/scripts/deploy-remote.sh"
+          # 写入 SSH 密钥
+          if [ -n "${SSH_KEY}" ]; then
+            echo "${SSH_KEY}" > /tmp/deploy_key
+            chmod 600 /tmp/deploy_key
+            export SSH_KEY=/tmp/deploy_key
+          fi
+          # 根据远程架构选择对应 deb 包
+          REMOTE_ARCH=$(ssh -o StrictHostKeyChecking=no -p "${SSH_PORT:-22}" \
+            ${SSH_KEY:+-i "${SSH_KEY}"} "${SSH_USER}@${SSH_HOST}" \
+            "dpkg --print-architecture" 2>/dev/null || echo "amd64")
+          echo "Remote architecture detected: ${REMOTE_ARCH}"
+          DEB_FILE="${{ github.workspace }}/output/dbeaver-ce-${{ env.DBEAVER_VERSION }}_${REMOTE_ARCH}.deb"
+          if [ ! -f "${DEB_FILE}" ]; then
+            echo "::error::No matching deb for arch ${REMOTE_ARCH}: ${DEB_FILE}"
+            ls -la "${{ github.workspace }}/output/"
+            exit 1
+          fi
+          bash "${{ github.workspace }}/scripts/deploy-remote.sh" \
+            --host "${SSH_HOST}" \
+            --user "${SSH_USER}" \
+            --port "${SSH_PORT:-22}" \
+            ${SSH_KEY:+--key "${SSH_KEY}"} \
+            "${DEB_FILE}"
+
+  # ===========================================================================
+  # 汇总 Job - 输出构建摘要
+  # ===========================================================================
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+    steps:
+      - name: Generate build summary
+        run: |
+          cat <<'EOF' >> $GITHUB_STEP_SUMMARY
+          ## DBeaver ${{ env.DBEAVER_VERSION }} 构建结果
+
+          | 项目 | 详情 |
+          |------|------|
+          | 版本 | ${{ env.DBEAVER_VERSION }} |
+          | 构建状态 | ${{ needs.build.result }} |
+          | Java 版本 | ${{ env.JAVA_VERSION }} (Temurin) |
+          | 目标系统 | UOS 20 / Ubuntu 18.04+ / Debian 10+ |
+
+          ### 产物下载
+          构建完成后可在 **Artifacts** 区域下载:
+          - `dbeaver-ce-${{ env.DBEAVER_VERSION }}-deb-packages` - .deb 安装包
+          - `dbeaver-ce-${{ env.DBEAVER_VERSION }}-tarballs` - tar.gz 绿色版
+
+          ### 安装方式
+          ```bash
+          # UOS 20 / Ubuntu / Debian
+          sudo dpkg -i dbeaver-ce_21.0.0_amd64.deb
+          sudo apt-get install -f -y   # 修复依赖
+
+          # 或 ARM64
+          sudo dpkg -i dbeaver-ce_21.0.0_arm64.deb
+          ```
+
+          ### SSH 调试
+          如需调试构建过程，手动触发工作流时勾选 **ssh_debug**，
+          构建前会启动 tmate 会话，可通过 SSH 接入查看实时状态。
+          EOF

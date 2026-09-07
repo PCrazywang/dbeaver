@@ -1,0 +1,29 @@
+# Build artifacts
+build/
+output/
+*.deb
+*.tar.gz
+*.zip
+
+# Maven
+target/
+*.class
+*.jar
+!.mvn/wrapper/*.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+tmp/
+temp/
+*.log

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=DBeaver
+GenericName=Database Manager
+Comment=Universal Database Manager and SQL Client
+Exec=/opt/dbeaver/dbeaver %u
+Icon=dbeaver
+Terminal=false
+Categories=Development;IDE;Database;
+StartupNotify=true
+StartupWMClass=DBeaver
+MimeType=application/x-sql;text/x-sql;
+Keywords=database;sql;ide;
