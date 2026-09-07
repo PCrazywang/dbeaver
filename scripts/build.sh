@@ -117,6 +117,25 @@ if OLD_P2_REPO in content:
 else:
     print("[WARN] Could not find old p2 repo URL: {}".format(OLD_P2_REPO))
 
+# 移除已失效的 p2 仓库 (域名已下线, 会导致 Unknown Host 错误)
+# eclipse-color-theme: https://eclipse-color-theme.github.com/update (域名已失效)
+DEAD_REPOS = ["eclipse-color-theme"]
+for repo_id in DEAD_REPOS:
+    pattern = r'<repository>\s*<id>' + repo_id + r'</id>.*?</repository>'
+    match = re.search(pattern, content, re.DOTALL)
+    if match:
+        content = content[:match.start()] + content[match.end():]
+        print("[PATCH] Removed dead p2 repository: {}".format(repo_id))
+    else:
+        # 尝试更宽松的匹配 (id 可能在 url 之后)
+        pattern2 = r'<repository>[^<]*<id>' + repo_id + r'</id>.*?</repository>'
+        match2 = re.search(pattern2, content, re.DOTALL)
+        if match2:
+            content = content[:match2.start()] + content[match2.end():]
+            print("[PATCH] Removed dead p2 repository (loose match): {}".format(repo_id))
+        else:
+            print("[WARN] Could not find repository: {}".format(repo_id))
+
 with open("pom.xml", "w", encoding="utf-8") as f:
     f.write(content)
 print("[PATCH] pom.xml updated successfully")
