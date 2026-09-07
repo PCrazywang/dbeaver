@@ -122,6 +122,115 @@ with open("pom.xml", "w", encoding="utf-8") as f:
 print("[PATCH] pom.xml updated successfully")
 PYEOF
 
+# ---- 2.5. 注入第三方 bundle (从官方 x86_64 二进制包提取) ----
+# 23.2.5 的 p2 仓库不包含 21.0.0 需要的旧版第三方依赖 (如 net.sf.opencsv)
+# 从官方二进制包中提取所有第三方 bundle, 解压到源码 plugins/ 并加入 reactor,
+# 这样 Tycho 从本地 reactor 解析依赖, 不再依赖已失效的旧 p2 仓库
+echo "[2.5/5] Injecting third-party bundles from official binary..."
+OFFICIAL_TARBALL="${WORK_DIR}/dbeaver-official.tar.gz"
+OFFICIAL_EXTRACT="${WORK_DIR}/official-extract"
+
+if [ ! -f "${OFFICIAL_TARBALL}" ]; then
+    echo "  Downloading official x86_64 binary (for third-party bundles)..."
+    curl -fL --retry 3 --retry-delay 5 --retry-connrefused \
+        -o "${OFFICIAL_TARBALL}" \
+        "https://dbeaver.io/files/${DBEAVER_VERSION}/dbeaver-ce-${DBEAVER_VERSION}-linux.gtk.x86_64.tar.gz"
+fi
+
+rm -rf "${OFFICIAL_EXTRACT}"
+mkdir -p "${OFFICIAL_EXTRACT}"
+tar -xzf "${OFFICIAL_TARBALL}" -C "${OFFICIAL_EXTRACT}"
+
+OFFICIAL_PLUGINS_DIR=$(find "${OFFICIAL_EXTRACT}" -maxdepth 3 -type d -name plugins | head -1)
+if [ -z "${OFFICIAL_PLUGINS_DIR}" ]; then
+    echo "  WARN: Could not find plugins dir in official binary"
+    find "${OFFICIAL_EXTRACT}" -maxdepth 3 -type d | head -20
+else
+    echo "  Official plugins dir: ${OFFICIAL_PLUGINS_DIR}"
+    INJECTED_COUNT=0
+    NEW_MODULES=""
+
+    for jar in "${OFFICIAL_PLUGINS_DIR}"/*.jar; do
+        [ -f "${jar}" ] || continue
+        JAR_NAME=$(basename "${jar}")
+
+        # 跳过 DBeaver 自己的 bundle (它们已在源码 reactor 中)
+        if echo "${JAR_NAME}" | grep -q "^org.jkiss.dbeaver"; then
+            continue
+        fi
+
+        # 从 jar 文件名提取 bundle 名称: 第一个 _数字. 之前的部分
+        # 例如 net.sf.opencsv_2.3.0.jar -> net.sf.opencsv
+        BUNDLE_NAME=$(echo "${JAR_NAME}" | sed -E 's/^(.+?)_[0-9]+\..*\.jar$/\1/')
+        if [ -z "${BUNDLE_NAME}" ] || [ "${BUNDLE_NAME}" = "${JAR_NAME}" ]; then
+            echo "  WARN: Could not parse bundle name from ${JAR_NAME}, skipping"
+            continue
+        fi
+
+        # 检查源码中是否已存在该 bundle
+        TARGET_DIR="${SRC_DIR}/plugins/${BUNDLE_NAME}"
+        if [ -d "${TARGET_DIR}" ]; then
+            continue
+        fi
+
+        # 解压 jar 到源码 plugins 目录 (Tycho eclipse-plugin 打包需要目录结构)
+        mkdir -p "${TARGET_DIR}"
+        (cd "${TARGET_DIR}" && jar -xf "${jar}")
+
+        # 为第三方 bundle 创建 pom.xml
+        cat > "${TARGET_DIR}/pom.xml" <<BUNDLEPOM
+<?xml version="1.0" encoding="UTF-8"?>
+<project xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"
+  xmlns="http://maven.apache.org/POM/4.0.0"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.jkiss.dbeaver</groupId>
+    <artifactId>dbeaver</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../../</relativePath>
+  </parent>
+  <artifactId>${BUNDLE_NAME}</artifactId>
+  <packaging>eclipse-plugin</packaging>
+</project>
+BUNDLEPOM
+
+        NEW_MODULES="${NEW_MODULES} ${BUNDLE_NAME}"
+        INJECTED_COUNT=$((INJECTED_COUNT + 1))
+        echo "  INJECTED: ${BUNDLE_NAME}"
+    done
+
+    echo "  Total injected: ${INJECTED_COUNT} third-party bundles"
+
+    # 将新模块添加到 plugins/pom.xml 的默认 modules 段 (第一个 </modules> 之前)
+    if [ "${INJECTED_COUNT}" -gt 0 ]; then
+        echo "  Registering new modules in plugins/pom.xml..."
+        python3 - "${SRC_DIR}/plugins/pom.xml" ${NEW_MODULES} <<'PYEOF'
+import sys
+
+pom_path = sys.argv[1]
+new_modules = sys.argv[2:]
+
+with open(pom_path, "r", encoding="utf-8") as f:
+    content = f.read()
+
+modules_xml = ""
+for m in new_modules:
+    modules_xml += "<module>{}</module>\n".format(m)
+
+# 插入到第一个 </modules> 之前 (默认 modules 段, 非 desktop profile 中的)
+first_close = content.find("</modules>")
+if first_close > 0:
+    content = content[:first_close] + modules_xml + content[first_close:]
+    with open(pom_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print("  Registered {} modules".format(len(new_modules)))
+else:
+    print("  WARN: Could not find </modules> in plugins/pom.xml")
+PYEOF
+    fi
+fi
+
 # ---- 3. Maven 构建 ----
 echo "[3/5] Running Maven build (Tycho)..."
 MVN_ARGS="package -DskipTests=${SKIP_TESTS} -Dmaven.javadoc.skip=true -Dtycho.localArtifacts=ignore"
