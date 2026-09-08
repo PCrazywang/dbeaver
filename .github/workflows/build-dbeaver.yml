@@ -182,7 +182,9 @@ jobs:
           cd dist
           deb="dbeaver-ce_${DBEAVER_VERSION}_${{ matrix.deb_arch }}.deb"
           sha256sum --check "$deb.sha256"
-          apt-get install -y --no-install-recommends "./$deb"
+          # Debian 10 的 apt-get 不能可靠地处理本地 .deb 路径；apt 会解析
+          # 包的 Depends 并从已配置的 Debian 10 仓库安装所需运行时库。
+          apt install -y --no-install-recommends "./$deb"
 
           test "$(dpkg --print-architecture)" = "${{ matrix.deb_arch }}"
           test -x /opt/dbeaver/dbeaver
