@@ -1,307 +1,163 @@
-name: Build DBeaver 21.0.0 (Multi-Arch)
-
-# =============================================================================
-# DBeaver 21.0.0 多架构 CI 构建工作流
-# 目标系统: UOS 20 (Debian 10 系, glibc 2.28) / Ubuntu 18.04+ / Debian 10+
-# 支持架构: amd64 (x86_64) / arm64 (aarch64)
-#
-# 构建策略:
-#   - build job 在 x86_64 runner 上通过 Eclipse Tycho 交叉构建双架构
-#     (DBeaver 是 Java/Eclipse RCP 应用, Tycho 下载对应架构的 SWT fragment
-#      和 JRE, 无需原生 ARM 硬件即可产出 aarch64 产物)
-#   - verify-uos20 job 在 Debian 10 容器中实际安装 .deb 验证 ABI 兼容性
-#   - summary job 输出构建摘要
-#
-# 特性:
-#   - 手动触发时可启用 SSH 调试 (tmate)
-#   - 可选构建单架构或双架构
-#   - 构建完成自动打包 .deb (含 postinst/postrm/desktop/icon)
-#   - 可选远程部署到目标机器 (需配置 Secrets)
-# =============================================================================
+name: Build DBeaver 21.0.0 (UOS 20)
 
 permissions:
   contents: read
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+    paths:
+      - '.github/workflows/build-dbeaver.yml'
+      - 'scripts/**'
+      - 'debian/**'
+      - 'checksums/**'
+      - 'README.md'
+      - '.gitignore'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/build-dbeaver.yml'
+      - 'scripts/**'
+      - 'debian/**'
+      - 'checksums/**'
+      - 'README.md'
+      - '.gitignore'
+  workflow_dispatch:
+    inputs:
+      architectures:
+        description: 目标架构
+        type: choice
+        options:
+          - both
+          - amd64
+          - arm64
+        default: both
+        required: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-on:
-  push:
-    branches: [ main, master ]
-    paths:
-      - '.github/workflows/**'
-      - 'scripts/**'
-      - 'debian/**'
-      - 'patches/**'
-  pull_request:
-    branches: [ main, master ]
-  workflow_dispatch:
-    inputs:
-      ssh_debug:
-        description: '启用 SSH 调试 (tmate) - 构建前暂停等待 SSH 接入'
-        type: boolean
-        default: false
-        required: false
-      architectures:
-        description: '目标架构'
-        type: choice
-        options:
-          - 'both (amd64 + arm64)'
-          - 'amd64 only'
-          - 'arm64 only'
-        default: 'both (amd64 + arm64)'
-        required: false
-      skip_tests:
-        description: '跳过测试'
-        type: boolean
-        default: true
-        required: false
-      deploy_enabled:
-        description: '构建完成后远程部署 (需配置 Secrets)'
-        type: boolean
-        default: false
-        required: false
-
 env:
   DBEAVER_VERSION: '21.0.0'
-  JAVA_VERSION: '11'
-  MAVEN_OPTS: '-Xmx3g -XX:+UseG1GC -XX:MaxMetaspaceSize=512m'
+  TEMURIN_RELEASE: '11.0.32.1+1'
+  MAX_GLIBC: '2.28'
 
 jobs:
-  # ===========================================================================
-  # 构建 Job - x86_64 runner 上 Tycho 交叉构建产出双架构
-  # ===========================================================================
-  build:
-    name: Build DBeaver 21.0.0 (Tycho cross-build)
+  configure:
+    name: Configure architecture matrix
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - name: Select architectures
+        id: matrix
+        env:
+          SELECTED: ${{ github.event_name == 'workflow_dispatch' && inputs.architectures || 'both' }}
+        run: |
+          case "$SELECTED" in
+            both)
+              value='{"include":[{"deb_arch":"amd64","db_arch":"x86_64","runner":"ubuntu-22.04"},{"deb_arch":"arm64","db_arch":"aarch64","runner":"ubuntu-22.04-arm"}]}'
+              ;;
+            amd64)
+              value='{"include":[{"deb_arch":"amd64","db_arch":"x86_64","runner":"ubuntu-22.04"}]}'
+              ;;
+            arm64)
+              value='{"include":[{"deb_arch":"arm64","db_arch":"aarch64","runner":"ubuntu-22.04-arm"}]}'
+              ;;
+            *) echo "Unsupported architecture selection: $SELECTED" >&2; exit 2 ;;
+          esac
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Package ${{ matrix.deb_arch }}
+    needs: configure
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.configure.outputs.matrix) }}
 
     steps:
-      # -----------------------------------------------------------------------
-      # 0. 基础准备
-      # -----------------------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
 
-      - name: Setup JDK 11 (Temurin)
-        uses: actions/setup-java@v5
-        with:
-          distribution: 'temurin'
-          java-version: '11'
-          # 不使用 setup-java 内置的 cache: 'maven' —— 它会扫描仓库根目录的
-          # pom.xml 生成缓存键, 而本仓库不含 pom.xml (DBeaver 源码在构建时才克隆),
-          # 会报 "No file matched to [**/pom.xml]"。改用 actions/cache 手动缓存。
-
-      - name: Cache Maven local repository
-        uses: actions/cache@v4
-        with:
-          path: ~/.m2/repository
-          # DBeaver 21.0.0 的依赖集是固定的, 用版本号作为缓存键即可
-          key: maven-dbeaver-21.0.0-${{ runner.os }}
-          restore-keys: |
-            maven-dbeaver-21.0.0-
-
-      - name: Install build dependencies
+      - name: Install packaging tools
         run: |
           set -eu
           sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            dpkg-dev \
-            fakeroot \
-            file \
-            tar \
-            gzip \
-            python3 \
-            git
-          echo "--- Toolchain versions ---"
-          java -version
-          mvn -version
-          dpkg-deb --version
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl dpkg-dev file binutils
 
-      - name: Prepare output directories
+      - name: Fetch pinned upstream packages and stage DBeaver
+        env:
+          WORK_DIR: ${{ runner.temp }}/dbeaver-build
+          OUTPUT_DIR: ${{ github.workspace }}/output
         run: |
-          mkdir -p "${{ github.workspace }}/output"
-          mkdir -p "${{ github.workspace }}/build"
+          set -eu
+          chmod +x scripts/fetch-and-stage.sh scripts/package-deb.sh
+          bash scripts/fetch-and-stage.sh "${{ matrix.deb_arch }}"
+          bash scripts/package-deb.sh \
+            "output/dbeaver-ce-${DBEAVER_VERSION}-linux-gtk-${{ matrix.db_arch }}.tar.gz" \
+            output
 
-      # -----------------------------------------------------------------------
-      # 1. SSH 调试 (可选) - 使用 tmate 在构建前暂停, 接入后创建 continue 文件继续
-      # -----------------------------------------------------------------------
-      - name: Setup SSH debug session (tmate)
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ssh_debug == 'true' }}
-        uses: mxschmitt/action-tmate@v3
+      - name: Verify package metadata and payload
+        id: meta
+        run: |
+          set -eu
+          deb="output/dbeaver-ce_${DBEAVER_VERSION}_${{ matrix.deb_arch }}.deb"
+          tarball="output/dbeaver-ce-${DBEAVER_VERSION}-linux-gtk-${{ matrix.db_arch }}.tar.gz"
+          test -f "$deb" && test -f "$tarball"
+          test "$(dpkg-deb -f "$deb" Package)" = dbeaver-ce
+          test "$(dpkg-deb -f "$deb" Version)" = "$DBEAVER_VERSION"
+          test "$(dpkg-deb -f "$deb" Architecture)" = "${{ matrix.deb_arch }}"
+          file_list="$(mktemp)"
+          dpkg-deb --contents "$deb" > "$file_list"
+          grep -qE '^[^[:space:]]+[[:space:]].*[[:space:]]\./opt/dbeaver/dbeaver$' "$file_list"
+          grep -qE '^[^[:space:]]+[[:space:]].*[[:space:]]\./opt/dbeaver/jre/bin/java$' "$file_list"
+          grep -qE '^[^[:space:]]+[[:space:]].*[[:space:]]\./usr/bin/dbeaver$' "$file_list"
+          tar_list="$(mktemp)"
+          tar -tzf "$tarball" > "$tar_list"
+          grep -qx 'dbeaver/dbeaver' "$tar_list"
+          grep -qx 'dbeaver/jre/bin/java' "$tar_list"
+          deb_name="$(basename "$deb")"
+          tarball_name="$(basename "$tarball")"
+          (
+            cd output
+            sha256sum "$deb_name" > "$deb_name.sha256"
+            sha256sum "$tarball_name" > "$tarball_name.sha256"
+          )
+          echo "version=$DBEAVER_VERSION" >> "$GITHUB_OUTPUT"
+          ls -lh output
+
+      - uses: actions/upload-artifact@v7
         with:
-          limit-access-to-actor: true
-          install-dependencies: true
-        timeout-minutes: 60
-
-      # -----------------------------------------------------------------------
-      # 2. 执行构建脚本 (克隆源码 -> 修改 pom.xml 为 Linux 双架构 -> mvn package)
-      # -----------------------------------------------------------------------
-      - name: Build DBeaver (Maven + Tycho)
-        id: build
-        run: |
-          set -eu
-          chmod +x "${{ github.workspace }}/scripts/build.sh"
-          export WORK_DIR="${{ github.workspace }}/build"
-          export OUTPUT_DIR="${{ github.workspace }}/output"
-          export DBEAVER_VERSION="${{ env.DBEAVER_VERSION }}"
-          export SKIP_TESTS="${{ github.event.inputs.skip_tests || 'true' }}"
-          bash "${{ github.workspace }}/scripts/build.sh"
-
-      - name: Inspect build artifacts
-        run: |
-          echo "=== Output directory ==="
-          ls -lh "${{ github.workspace }}/output/" || true
-          echo ""
-          echo "=== Tycho products directory tree ==="
-          find "${{ github.workspace }}/build/dbeaver-src/product/standalone/target/products" -maxdepth 4 -type d 2>/dev/null || true
-
-      # -----------------------------------------------------------------------
-      # 3. 打包 .deb (按架构分别打包, 跳过未构建的架构)
-      # -----------------------------------------------------------------------
-      - name: Package amd64 .deb
-        if: ${{ github.event.inputs.architectures != 'arm64 only' }}
-        run: |
-          set -eu
-          chmod +x "${{ github.workspace }}/scripts/package-deb.sh"
-          TARBALL="${{ github.workspace }}/output/dbeaver-ce-${{ env.DBEAVER_VERSION }}-linux-gtk-x86_64.tar.gz"
-          if [ -f "${TARBALL}" ]; then
-            bash "${{ github.workspace }}/scripts/package-deb.sh" "${TARBALL}" "${{ github.workspace }}/output"
-          else
-            echo "::warning::amd64 tarball not found, skipping deb packaging"
-            ls -la "${{ github.workspace }}/output/"
-          fi
-
-      - name: Package arm64 .deb
-        if: ${{ github.event.inputs.architectures != 'amd64 only' }}
-        run: |
-          set -eu
-          chmod +x "${{ github.workspace }}/scripts/package-deb.sh"
-          TARBALL="${{ github.workspace }}/output/dbeaver-ce-${{ env.DBEAVER_VERSION }}-linux-gtk-aarch64.tar.gz"
-          if [ -f "${TARBALL}" ]; then
-            bash "${{ github.workspace }}/scripts/package-deb.sh" "${TARBALL}" "${{ github.workspace }}/output"
-          else
-            echo "::warning::arm64 tarball not found, skipping deb packaging"
-            ls -la "${{ github.workspace }}/output/"
-          fi
-
-      - name: Verify .deb package metadata
-        run: |
-          echo "=== Final artifacts ==="
-          ls -lh "${{ github.workspace }}/output/"*.deb 2>/dev/null || echo "(no .deb files)"
-          echo ""
-          for deb in "${{ github.workspace }}/output/"*.deb; do
-            if [ -f "${deb}" ]; then
-              echo "--- $(basename "${deb}") ---"
-              dpkg-deb --info "${deb}" 2>/dev/null | head -20
-              echo ""
-            fi
-          done
-
-      # -----------------------------------------------------------------------
-      # 4. 上传构建产物
-      # -----------------------------------------------------------------------
-      - name: Upload .deb artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: dbeaver-ce-21.0.0-deb-packages
+          name: dbeaver-ce-${{ env.DBEAVER_VERSION }}-${{ matrix.deb_arch }}
           path: |
-            ${{ github.workspace }}/output/*.deb
-          retention-days: 30
+            output/dbeaver-ce_${{ env.DBEAVER_VERSION }}_${{ matrix.deb_arch }}.deb
+            output/dbeaver-ce_${{ env.DBEAVER_VERSION }}_${{ matrix.deb_arch }}.deb.sha256
+            output/*.tar.gz
+            output/*.tar.gz.sha256
           if-no-files-found: error
           compression-level: 0
-
-      - name: Upload tar.gz artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: dbeaver-ce-21.0.0-tarballs
-          path: |
-            ${{ github.workspace }}/output/*.tar.gz
           retention-days: 14
-          if-no-files-found: warn
-          compression-level: 0
 
-      - name: Upload build logs (on failure)
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: build-logs-${{ github.run_id }}
-          path: |
-            ${{ github.workspace }}/build/dbeaver-src/**/*.log
-            ${{ github.workspace }}/build/dbeaver-src/**/target/*.log
-          retention-days: 7
-          if-no-files-found: ignore
-
-      # -----------------------------------------------------------------------
-      # 5. 可选: 远程部署 (SSH 上传并 dpkg -i 安装)
-      # -----------------------------------------------------------------------
-      - name: Deploy to remote host (optional)
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_enabled == 'true' }}
-        env:
-          SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
-          SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
-          SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
-          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-        run: |
-          set -eu
-          if [ -z "${SSH_HOST}" ]; then
-            echo "::error::Deploy enabled but DEPLOY_SSH_HOST secret not configured"
-            exit 1
-          fi
-          chmod +x "${{ github.workspace }}/scripts/deploy-remote.sh"
-          if [ -n "${SSH_KEY}" ]; then
-            echo "${SSH_KEY}" > /tmp/deploy_key
-            chmod 600 /tmp/deploy_key
-            export SSH_KEY=/tmp/deploy_key
-          fi
-          # 检测远程机器架构并选择对应 deb 包
-          REMOTE_ARCH=$(ssh -o StrictHostKeyChecking=no -p "${SSH_PORT:-22}" \
-            ${SSH_KEY:+-i "${SSH_KEY}"} "${SSH_USER}@${SSH_HOST}" \
-            "dpkg --print-architecture" 2>/dev/null || echo "amd64")
-          echo "Remote architecture detected: ${REMOTE_ARCH}"
-          DEB_FILE="${{ github.workspace }}/output/dbeaver-ce-${{ env.DBEAVER_VERSION }}_${REMOTE_ARCH}.deb"
-          if [ ! -f "${DEB_FILE}" ]; then
-            echo "::error::No matching deb for arch ${REMOTE_ARCH}: ${DEB_FILE}"
-            ls -la "${{ github.workspace }}/output/"
-            exit 1
-          fi
-          bash "${{ github.workspace }}/scripts/deploy-remote.sh" \
-            --host "${SSH_HOST}" \
-            --user "${SSH_USER}" \
-            --port "${SSH_PORT:-22}" \
-            ${SSH_KEY:+--key "${SSH_KEY}"} \
-            "${DEB_FILE}"
-
-  # ===========================================================================
-  # UOS 20 兼容性验证 Job
-  # 在 Debian 10 (glibc 2.28, 与 UOS 20 桌面版相同 ABI 基线) 容器中
-  # 实际安装 .deb 包并验证: 依赖可解析 / 文件结构完整 / JRE 可运行
-  # ===========================================================================
   verify-uos20:
-    name: Verify on Debian 10 (${{ matrix.arch }})
-    needs: build
+    name: Verify on Debian 10 / ${{ matrix.deb_arch }}
+    needs: [configure, build]
     runs-on: ${{ matrix.runner }}
     container: debian:10-slim
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-latest
-            deb_arch: amd64
-          - arch: arm64
-            runner: ubuntu-22.04-arm
-            deb_arch: arm64
+      matrix: ${{ fromJSON(needs.configure.outputs.matrix) }}
 
     steps:
-      - name: Install Debian 10 runtime dependencies
+      - name: Configure archived Debian 10 repositories
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           set -eu
-          # Debian 10 已归档, 使用 archive.debian.org 并禁用有效期检查
           printf '%s\n' \
             'deb http://archive.debian.org/debian buster main' \
             'deb http://archive.debian.org/debian-security buster/updates main' \
@@ -309,134 +165,118 @@ jobs:
           printf 'Acquire::Check-Valid-Until "false";\n' \
             > /etc/apt/apt.conf.d/99archive
           apt-get -o Acquire::Check-Valid-Until=false update
-          apt-get install -y --no-install-recommends \
-            ca-certificates \
-            libgtk-3-0 \
-            libglib2.0-0 \
-            libpango-1.0-0 \
-            libcairo2 \
-            libxtst6 \
-            libxss1 \
-            libswt-gtk-4-java \
-            procps
-          echo "--- ABI baseline ---"
-          cat /etc/os-release | head -3
-          getconf GNU_LIBC_VERSION
+          apt-get install -y --no-install-recommends ca-certificates file
+          test "$(dpkg --print-architecture)" = "${{ matrix.deb_arch }}"
+          test "$(getconf GNU_LIBC_VERSION)" = "glibc $MAX_GLIBC"
 
-      - name: Download .deb artifact
-        uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v7
         with:
-          name: dbeaver-ce-21.0.0-deb-packages
+          name: dbeaver-ce-${{ env.DBEAVER_VERSION }}-${{ matrix.deb_arch }}
           path: dist
 
-      - name: Install DBeaver .deb on Debian 10
+      - name: Install package and verify runtime links
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           set -eu
-          DEB_FILE="dist/dbeaver-ce_21.0.0_${{ matrix.deb_arch }}.deb"
-          if [ ! -f "${DEB_FILE}" ]; then
-            echo "::warning::${{ matrix.deb_arch }} .deb not found, skipping verification"
-            ls -la dist/
-            exit 0
-          fi
-          echo "=== Installing ${DEB_FILE} ==="
-          dpkg -i "${DEB_FILE}" || {
-            echo "dpkg reported missing dependencies, fixing..."
-            apt-get install -f -y
-            dpkg -i "${DEB_FILE}"
-          }
-          echo ""
-          echo "=== Package status ==="
-          dpkg -l dbeaver-ce
+          cd dist
+          deb="dbeaver-ce_${DBEAVER_VERSION}_${{ matrix.deb_arch }}.deb"
+          sha256sum --check "$deb.sha256"
+          apt-get install -y --no-install-recommends "./$deb"
 
-      - name: Verify installation integrity
-        run: |
-          set -eu
-          echo "=== Verify binary and symlink ==="
+          test "$(dpkg --print-architecture)" = "${{ matrix.deb_arch }}"
           test -x /opt/dbeaver/dbeaver
-          test -L /usr/bin/dbeaver
+          test -x /opt/dbeaver/jre/bin/java
+          test -x /usr/bin/dbeaver
           test -f /usr/share/applications/dbeaver.desktop
-          ls -la /opt/dbeaver/dbeaver
-          ls -la /usr/bin/dbeaver
-          echo ""
+          /opt/dbeaver/jre/bin/java -version
 
-          echo "=== Verify bundled JRE ==="
-          # DBeaver 21.x 自带 OpenJDK 11, 验证 JRE 可在 Debian 10 上运行
-          if [ -d /opt/dbeaver/jre ]; then
-            /opt/dbeaver/jre/bin/java -version
-          elif [ -d /opt/dbeaver/plugins/org.jkiss.dbeaver.jre*/ ]; then
-            echo "JRE bundled as plugin (Eclipse Tycho layout)"
-          else
-            echo "Note: No bundled JRE found, will use system Java"
-            java -version 2>&1 || true
-          fi
-          echo ""
+          # DBeaver 本身是 GUI，不在无 X server 的 CI 里启动；但检查所有 ELF
+          # 启动器和 JNI 库，确保在 UOS 20 ABI 基线没有未解析的共享库。
+          missing=0
+          while IFS= read -r -d '' elf; do
+            description="$(file "$elf")"
+            if [[ "$description" == *ELF* ]]; then
+              links_file="$(mktemp)"
+              if ! ldd "$elf" > "$links_file" 2>&1; then
+                echo "ldd failed for $elf" >&2
+                cat "$links_file" >&2
+                rm -f "$links_file"
+                missing=1
+                continue
+              fi
+              if grep -Eq "not found|undefined symbol|version [^ ]+ not found" "$links_file"; then
+                echo "Unresolved dependencies, symbols, or symbol versions in $elf" >&2
+                cat "$links_file" >&2
+                missing=1
+              fi
+              rm -f "$links_file"
+            fi
+          done < <(find /opt/dbeaver -type f -print0)
+          test "$missing" -eq 0
 
-          echo "=== Verify file structure ==="
-          test -d /opt/dbeaver/plugins
-          test -d /opt/dbeaver/features
-          test -f /opt/dbeaver/dbeaver.ini
-          echo "Plugins count: $(ls /opt/dbeaver/plugins/ | wc -l)"
-          echo "Features count: $(ls /opt/dbeaver/features/ | wc -l)"
-          echo "Installed size: $(du -sh /opt/dbeaver | cut -f1)"
-          echo ""
+          grep -F 'Exec=/usr/bin/dbeaver %u' /usr/share/applications/dbeaver.desktop
+          grep -F '/opt/dbeaver/jre/bin/java' /usr/bin/dbeaver
+          dpkg-query -W -f='Status Architecture Version\n' dbeaver-ce
+          cat /opt/dbeaver/BUILD-ENVIRONMENT.txt
 
-          echo "=== Verify desktop entry ==="
-          cat /usr/share/applications/dbeaver.desktop
-          echo ""
-
-          echo "=== ALL VERIFICATIONS PASSED ==="
-
-      - name: Cleanup (remove package)
-        if: always()
-        run: |
-          dpkg -r dbeaver-ce 2>/dev/null || true
-          rm -rf /opt/dbeaver
-
-  # ===========================================================================
-  # 汇总 Job - 输出构建摘要
-  # ===========================================================================
-  summary:
-    name: Build Summary
+  release:
+    name: Publish GitHub Release
+    needs: [build, verify-uos20]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Guard version tag
+        run: |
+          set -eu
+          tag="${GITHUB_REF#refs/tags/}"
+          test "$tag" = "v${DBEAVER_VERSION}" || {
+            echo "Tag $tag does not match DBeaver ${DBEAVER_VERSION}." >&2
+            exit 1
+          }
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: dbeaver-ce-${{ env.DBEAVER_VERSION }}-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          ls -lh dist
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* \
+              --title "DBeaver CE ${DBEAVER_VERSION}" \
+              --notes "DBeaver CE ${DBEAVER_VERSION} for UOS 20 / Debian 10 ABI.
+
+            Includes amd64 and arm64 packages, a bundled pinned Temurin 11 JRE,
+            SHA-256 files, and Debian 10 runtime verification."
+          fi
+
+  summary:
+    name: Build summary
     needs: [build, verify-uos20]
     if: always()
+    runs-on: ubuntu-latest
     steps:
-      - name: Generate build summary
+      - name: Write summary
         run: |
-          cat <<'EOF' >> $GITHUB_STEP_SUMMARY
-          ## DBeaver 21.0.0 构建结果
-
-          | 项目 | 详情 |
-          |------|------|
-          | 版本 | 21.0.0 |
-          | 构建状态 | ${{ needs.build.result }} |
-          | UOS 20 验证 | ${{ needs.verify-uos20.result }} |
-          | Java 版本 | 11 (Temurin) |
-          | 构建方式 | Eclipse Tycho 2.0.0 交叉构建 |
-          | 目标系统 | UOS 20 / Ubuntu 18.04+ / Debian 10+ (glibc 2.28) |
-
-          ### 产物下载
-          构建完成后可在 **Artifacts** 区域下载:
-          - `dbeaver-ce-21.0.0-deb-packages` - .deb 安装包 (amd64 + arm64)
-          - `dbeaver-ce-21.0.0-tarballs` - tar.gz 绿色版
-
-          ### 安装方式
-          ```bash
-          # UOS 20 / Ubuntu / Debian (x86_64)
-          sudo dpkg -i dbeaver-ce_21.0.0_amd64.deb
-          sudo apt-get install -f -y
-
-          # UOS 20 / Ubuntu / Debian (ARM64 / 鲲鹏 / 飞腾)
-          sudo dpkg -i dbeaver-ce_21.0.0_arm64.deb
-          sudo apt-get install -f -y
-          ```
-
-          ### SSH 调试
-          如需调试构建过程，手动触发工作流时勾选 **ssh_debug**，
-          构建前会启动 tmate 会话，可通过 SSH 接入查看实时状态。
-          接入后创建 `continue` 文件继续构建，或创建 `kill` 文件终止。
-
-          ### UOS 20 兼容性
-          产物已在 Debian 10 (glibc 2.28, 与 UOS 20 桌面版相同 ABI) 容器中
-          通过安装验证和完整性检查。DBeaver 自带 OpenJDK 11，不依赖系统 Java。
-          EOF
+          {
+            echo "## DBeaver ${DBEAVER_VERSION}"
+            echo
+            echo '| 项目 | 结果 |'
+            echo '| --- | --- |'
+            echo '| 双架构装配 | ${{ needs.build.result }} |'
+            echo '| Debian 10 / UOS 20 ABI 验证 | ${{ needs.verify-uos20.result }} |'
+            echo '| 输入 | 官方 nojdk 包 + 固定 Temurin 11 JRE（均校验 SHA-256） |'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,243 +1,180 @@
 #!/usr/bin/env bash
-# =============================================================================
-# DBeaver tar.gz -> .deb 打包脚本
-# 兼容: UOS 20 (Debian 10 系) / Ubuntu 18.04+ / Debian 10+
-# 架构: amd64 (x86_64) / arm64 (aarch64)
-# =============================================================================
+# 将 scripts/fetch-and-stage.sh 产出的 tar.gz 转成 Debian 包。
 set -euo pipefail
 
 DBEAVER_VERSION="${DBEAVER_VERSION:-21.0.0}"
-OUTPUT_DIR="${OUTPUT_DIR:-$(pwd)/output}"
 MAINTAINER="${MAINTAINER:-DBeaver Builder <builder@local>}"
 INSTALL_PREFIX="${INSTALL_PREFIX:-/opt/dbeaver}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DEBIAN_TEMPLATE_DIR="${PROJECT_ROOT}/debian"
+TEMPLATE_DIR="${PROJECT_ROOT}/debian"
+DEFAULT_OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/output}"
 
 usage() {
-    cat <<EOF
-Usage: $0 <tarball-path> [output-dir]
+    cat >&2 <<EOF
+用法: $0 <tarball-path> [output-dir]
 
-  tarball-path : Path to dbeaver-ce-<version>-linux-gtk-<arch>.tar.gz
-  output-dir   : Directory to place the .deb (default: ${OUTPUT_DIR})
-
-Environment variables:
-  DBEAVER_VERSION  - DBeaver version (default: 21.0.0)
-  MAINTAINER       - Package maintainer string
-  INSTALL_PREFIX   - Install location (default: /opt/dbeaver)
+  tarball-path  dbeaver-ce-<版本>-linux-gtk-<x86_64|aarch64>.tar.gz
+  output-dir    .deb 输出目录 (默认 <repo>/output)
 EOF
-    exit 1
+    exit 2
 }
 
-[ $# -lt 1 ] && usage
+[ $# -ge 1 ] && [ $# -le 2 ] || usage
 TARBALL="$(realpath "$1")"
-OUTPUT_DIR="${2:-${OUTPUT_DIR}}"
+OUTPUT_DIR="${2:-${DEFAULT_OUTPUT_DIR}}"
+[ -f "${TARBALL}" ] || { echo "错误: 找不到 ${TARBALL}" >&2; exit 1; }
+case "${INSTALL_PREFIX}" in
+    /*) ;;
+    *) echo "错误: INSTALL_PREFIX 必须是绝对路径: ${INSTALL_PREFIX}" >&2; exit 1 ;;
+esac
+if [[ "${INSTALL_PREFIX}" == *"'"* ||
+      "${INSTALL_PREFIX}" == *$'\n'* ||
+      "${INSTALL_PREFIX}" == *$'\r'* ]]; then
+    echo "错误: INSTALL_PREFIX 不能包含单引号或换行符" >&2
+    exit 1
+fi
 mkdir -p "${OUTPUT_DIR}"
+OUTPUT_DIR="$(realpath "${OUTPUT_DIR}")"
 
-[ ! -f "${TARBALL}" ] && { echo "ERROR: Tarball not found: ${TARBALL}"; exit 1; }
+case "$(basename "${TARBALL}")" in
+    "dbeaver-ce-${DBEAVER_VERSION}-linux-gtk-x86_64.tar.gz")
+        DEB_ARCH=amd64; ELF_RE='x86-64|X86-64' ;;
+    "dbeaver-ce-${DBEAVER_VERSION}-linux-gtk-aarch64.tar.gz")
+        DEB_ARCH=arm64; ELF_RE='aarch64|AArch64' ;;
+    *)
+        echo "错误: 文件名必须与版本和目标架构完全匹配: $(basename "${TARBALL}")" >&2
+        exit 1
+        ;;
+esac
 
-# ---- 从文件名推断架构 ----
-BASENAME="$(basename "${TARBALL}")"
-if echo "${BASENAME}" | grep -qi "x86_64\|amd64"; then
-    ARCH="amd64"
-    ARCH_LONG="x86_64"
-elif echo "${BASENAME}" | grep -qi "aarch64\|arm64"; then
-    ARCH="arm64"
-    ARCH_LONG="aarch64"
-else
-    echo "ERROR: Cannot determine architecture from filename: ${BASENAME}"
-    exit 1
-fi
+for path in control.in dbeaver.wrapper.in dbeaver.desktop postinst postrm; do
+    [ -f "${TEMPLATE_DIR}/${path}" ] || {
+        echo "错误: 缺少 Debian 模板 ${TEMPLATE_DIR}/${path}" >&2
+        exit 1
+    }
+done
 
-echo "============================================================"
-echo " Packaging DBeaver ${DBEAVER_VERSION} (${ARCH})"
-echo " Tarball : ${TARBALL}"
-echo " Output  : ${OUTPUT_DIR}"
-echo " Prefix  : ${INSTALL_PREFIX}"
-echo "============================================================"
+STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dbeaver-deb-XXXXXX")"
+trap 'rm -rf "${STAGING_DIR}"' EXIT
 
-# ---- 创建临时打包目录 ----
-PKG_NAME="dbeaver-ce"
-PKG_VERSION="${DBEAVER_VERSION}"
-PKG_ARCH="${ARCH}"
-STAGING_DIR="$(mktemp -d /tmp/dbeaver-deb-XXXXXX)"
-trap "rm -rf ${STAGING_DIR}" EXIT
+mkdir -p \
+    "${STAGING_DIR}/DEBIAN" \
+    "${STAGING_DIR}${INSTALL_PREFIX}" \
+    "${STAGING_DIR}/usr/bin" \
+    "${STAGING_DIR}/usr/share/applications" \
+    "${STAGING_DIR}/usr/share/icons/hicolor/128x128/apps" \
+    "${STAGING_DIR}/usr/share/doc/dbeaver-ce"
 
-echo "[1/6] Creating directory skeleton..."
-mkdir -p "${STAGING_DIR}/DEBIAN"
-mkdir -p "${STAGING_DIR}${INSTALL_PREFIX}"
-mkdir -p "${STAGING_DIR}/usr/bin"
-mkdir -p "${STAGING_DIR}/usr/share/applications"
-mkdir -p "${STAGING_DIR}/usr/share/icons/hicolor/128x128/apps"
-mkdir -p "${STAGING_DIR}/usr/share/doc/${PKG_NAME}"
-
-# ---- 解压 DBeaver ----
-echo "[2/6] Extracting DBeaver to ${INSTALL_PREFIX}..."
+echo "[解包] $(basename "${TARBALL}") -> ${INSTALL_PREFIX}"
 tar -xzf "${TARBALL}" -C "${STAGING_DIR}${INSTALL_PREFIX}" --strip-components=1
+APP="${STAGING_DIR}${INSTALL_PREFIX}"
 
-# 验证可执行文件存在
-if [ ! -f "${STAGING_DIR}${INSTALL_PREFIX}/dbeaver" ]; then
-    echo "ERROR: dbeaver executable not found after extraction"
-    ls -la "${STAGING_DIR}${INSTALL_PREFIX}/"
+test -x "${APP}/dbeaver"
+test -f "${APP}/dbeaver.ini"
+test -d "${APP}/plugins"
+test -d "${APP}/features"
+test -x "${APP}/jre/bin/java"
+
+if command -v readelf >/dev/null 2>&1; then
+    if ! APP_ELF_DESC="$(readelf -h "${APP}/dbeaver" 2>&1)"; then
+        echo "错误: DBeaver 启动器不是有效的 ELF 文件" >&2
+        printf '%s\n' "${APP_ELF_DESC}" >&2
+        exit 1
+    fi
+    if ! JRE_ELF_DESC="$(readelf -h "${APP}/jre/bin/java" 2>&1)"; then
+        echo "错误: 包内 JRE 不是有效的 ELF 文件" >&2
+        printf '%s\n' "${JRE_ELF_DESC}" >&2
+        exit 1
+    fi
+    APP_ELF_DESC="$(printf '%s\n' "${APP_ELF_DESC}" | grep 'Machine:')"
+    JRE_ELF_DESC="$(printf '%s\n' "${JRE_ELF_DESC}" | grep 'Machine:')"
+elif command -v file >/dev/null 2>&1; then
+    APP_ELF_DESC="$(file "${APP}/dbeaver")"
+    JRE_ELF_DESC="$(file "${APP}/jre/bin/java")"
+    for description in "${APP_ELF_DESC}" "${JRE_ELF_DESC}"; do
+        if [[ "${description}" != *ELF* ]]; then
+            echo "错误: 包内原生文件不是 ELF: ${description}" >&2
+            exit 1
+        fi
+    done
+else
+    echo "错误: 需要 readelf 或 file 来确认包内架构" >&2
     exit 1
 fi
-
-# 确保可执行权限
-chmod +x "${STAGING_DIR}${INSTALL_PREFIX}/dbeaver"
-chmod +x "${STAGING_DIR}${INSTALL_PREFIX}/dbeaver.ini" 2>/dev/null || true
-
-# ---- 创建 DEBIAN/control ----
-echo "[3/6] Generating DEBIAN/control..."
-INSTALLED_SIZE=$(du -sk "${STAGING_DIR}${INSTALL_PREFIX}" | cut -f1)
-
-cat > "${STAGING_DIR}/DEBIAN/control" <<CTRL
-Package: ${PKG_NAME}
-Version: ${PKG_VERSION}
-Architecture: ${PKG_ARCH}
-Maintainer: ${MAINTAINER}
-Installed-Size: ${INSTALLED_SIZE}
-Depends: libgtk-3-0, libglib2.0-0, libpango-1.0-0, libcairo2, libxtst6, libxss1, libgtk2.0-0 | libgtk-3-0, default-jre | openjdk-11-jre | java11-runtime
-Section: devel
-Priority: optional
-Homepage: https://dbeaver.io/
-Description: Universal database manager and SQL client
- DBeaver is a free multi-platform database tool for developers,
- SQL programmers, analysts and DBAs. It supports all popular
- databases: MySQL, PostgreSQL, SQLite, Oracle, DB2, SQL Server,
- Sybase, MS Access, Teradata, Firebird, Apache Hive, Phoenix,
- Presto, etc.
- .
- This package is built for UOS 20 / Debian / Ubuntu (${ARCH}).
- Bundled with OpenJDK 11 runtime.
-CTRL
-
-# ---- 创建 postinst / postrm ----
-echo "[4/6] Creating maintainer scripts..."
-
-cat > "${STAGING_DIR}/DEBIAN/postinst" <<'POSTINST'
-#!/bin/sh
-set -e
-
-# 创建符号链接
-if [ ! -e /usr/bin/dbeaver ]; then
-    ln -sf /opt/dbeaver/dbeaver /usr/bin/dbeaver
-fi
-
-# 更新桌面数据库
-if command -v update-desktop-database >/dev/null 2>&1; then
-    update-desktop-database -q /usr/share/applications || true
-fi
-
-# 更新图标缓存
-if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
-fi
-
-# UOS 20 兼容: 确保 mime 数据库更新
-if command -v update-mime-database >/dev/null 2>&1; then
-    update-mime-database /usr/share/mime >/dev/null 2>&1 || true
-fi
-
-exit 0
-POSTINST
-
-cat > "${STAGING_DIR}/DEBIAN/postrm" <<'POSTRM'
-#!/bin/sh
-set -e
-
-if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
-    rm -f /usr/bin/dbeaver
-
-    if command -v update-desktop-database >/dev/null 2>&1; then
-        update-desktop-database -q /usr/share/applications || true
-    fi
-
-    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-        gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
-    fi
-fi
-
-exit 0
-POSTRM
-
-chmod 755 "${STAGING_DIR}/DEBIAN/postinst"
-chmod 755 "${STAGING_DIR}/DEBIAN/postrm"
-
-# ---- 桌面入口与图标 ----
-echo "[5/6] Installing desktop entry and icons..."
-
-# 从 DBeaver 安装目录提取图标
-ICON_SRC="${STAGING_DIR}${INSTALL_PREFIX}/icon.xpm"
-if [ -f "${ICON_SRC}" ]; then
-    cp "${ICON_SRC}" "${STAGING_DIR}/usr/share/icons/hicolor/128x128/apps/dbeaver.xpm"
-fi
-# 尝试其他图标路径
-for icon in "${STAGING_DIR}${INSTALL_PREFIX}/plugins/org.jkiss.dbeaver.core_"*/icons/dbeaver.png; do
-    if [ -f "${icon}" ]; then
-        cp "${icon}" "${STAGING_DIR}/usr/share/icons/hicolor/128x128/apps/dbeaver.png"
-        break
+for entry in "启动器:${APP_ELF_DESC}" "JRE:${JRE_ELF_DESC}"; do
+    label="${entry%%:*}"
+    description="${entry#*:}"
+    printf '  %s: %s\n' "${label}" "${description}"
+    if ! printf '%s\n' "${description}" | grep -qE "${ELF_RE}"; then
+        echo "错误: ${label} 与目标架构 ${DEB_ARCH} 不一致" >&2
+        exit 1
     fi
 done
 
-cat > "${STAGING_DIR}/usr/share/applications/dbeaver.desktop" <<DESKTOP
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=DBeaver
-GenericName=Database Manager
-Comment=Universal Database Manager and SQL Client
-Exec=${INSTALL_PREFIX}/dbeaver %u
-Icon=dbeaver
-Terminal=false
-Categories=Development;IDE;Database;
-StartupNotify=true
-StartupWMClass=DBeaver
-MimeType=application/x-sql;text/x-sql;
-Keywords=database;sql;ide;
-DESKTOP
+# /usr/bin/dbeaver 明确指定包内 JRE，桌面入口也调用这个包装脚本。
+escape_sed_replacement() {
+    printf '%s' "$1" | sed 's/[&|]/\\&/g'
+}
+SED_INSTALL_PREFIX="$(escape_sed_replacement "${INSTALL_PREFIX}")"
+sed "s|@INSTALL_PREFIX@|${SED_INSTALL_PREFIX}|g" \
+    "${TEMPLATE_DIR}/dbeaver.wrapper.in" > "${STAGING_DIR}/usr/bin/dbeaver"
+chmod 0755 "${STAGING_DIR}/usr/bin/dbeaver"
 
-# ---- 版权说明 ----
-cat > "${STAGING_DIR}/usr/share/doc/${PKG_NAME}/copyright" <<'COPYRIGHT'
+install -m 0644 "${TEMPLATE_DIR}/dbeaver.desktop" \
+    "${STAGING_DIR}/usr/share/applications/dbeaver.desktop"
+chmod 0644 "${STAGING_DIR}/usr/share/applications/dbeaver.desktop"
+
+# 21.0.0 官方包的根目录通常有 icon.xpm。若没有，尝试 core plugin 的 PNG。
+if [ -f "${APP}/icon.xpm" ]; then
+    install -m 0644 "${APP}/icon.xpm" \
+        "${STAGING_DIR}/usr/share/icons/hicolor/128x128/apps/dbeaver.xpm"
+else
+    ICON="$(find "${APP}/plugins" -path '*/icons/dbeaver.png' -print -quit)"
+    if [ -n "${ICON}" ]; then
+        install -m 0644 "${ICON}" \
+            "${STAGING_DIR}/usr/share/icons/hicolor/128x128/apps/dbeaver.png"
+    fi
+fi
+
+install -m 0755 "${TEMPLATE_DIR}/postinst" "${STAGING_DIR}/DEBIAN/postinst"
+install -m 0755 "${TEMPLATE_DIR}/postrm" "${STAGING_DIR}/DEBIAN/postrm"
+
+cat > "${STAGING_DIR}/usr/share/doc/dbeaver-ce/copyright" <<'EOF'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: DBeaver Community Edition
-Upstream-Contact: https://github.com/dbeaver/dbeaver
 Source: https://github.com/dbeaver/dbeaver
-
 Files: *
-Copyright: 2010-2021 Serge Rider (serge@dbeaver.com)
+Copyright: 2010-2021 DBeaver Corp and contributors
 License: Apache-2.0
+ On Debian systems the complete Apache 2.0 license text is available at
+ /usr/share/common-licenses/Apache-2.0.
+EOF
 
-License: Apache-2.0
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
- .
-   http://www.apache.org/licenses/LICENSE-2.0
- .
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-COPYRIGHT
+INSTALLED_SIZE="$(du -sk "${STAGING_DIR}" | cut -f1)"
+SED_VERSION="$(escape_sed_replacement "${DBEAVER_VERSION}")"
+SED_MAINTAINER="$(escape_sed_replacement "${MAINTAINER}")"
+sed \
+    -e "s|@PACKAGE@|dbeaver-ce|g" \
+    -e "s|@VERSION@|${SED_VERSION}|g" \
+    -e "s|@ARCH@|${DEB_ARCH}|g" \
+    -e "s|@MAINTAINER@|${SED_MAINTAINER}|g" \
+    -e "s|@INSTALLED_SIZE@|${INSTALLED_SIZE}|g" \
+    "${TEMPLATE_DIR}/control.in" > "${STAGING_DIR}/DEBIAN/control"
 
-# ---- 打包 ----
-echo "[6/6] Building .deb package..."
-DEB_FILE="${OUTPUT_DIR}/${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}.deb"
+# Debian 控制文件拒绝组可写；应用文件保持上游的可执行位，不做全树 chmod +x。
+find "${STAGING_DIR}" -type d -exec chmod 0755 {} +
+find "${STAGING_DIR}" -type f -exec chmod go-w {} +
 
-# 修复权限
-find "${STAGING_DIR}" -type d -exec chmod 755 {} \;
-find "${STAGING_DIR}" -type f -exec chmod go-w {} \;
-
+DEB_FILE="${OUTPUT_DIR}/dbeaver-ce_${DBEAVER_VERSION}_${DEB_ARCH}.deb"
+echo "[打包] ${DEB_FILE}"
+rm -f "${DEB_FILE}"
 dpkg-deb --build --root-owner-group "${STAGING_DIR}" "${DEB_FILE}"
+dpkg-deb --info "${DEB_FILE}" >/dev/null
+CONTENTS_FILE="$(mktemp "${TMPDIR:-/tmp}/dbeaver-contents-XXXXXX")"
+dpkg-deb --contents "${DEB_FILE}" > "${CONTENTS_FILE}"
+grep -qE '^[-[:alnum:]]+[[:space:]].*[[:space:]][.]/usr/bin/dbeaver$' "${CONTENTS_FILE}"
+rm -f "${CONTENTS_FILE}"
 
-echo "============================================================"
-echo " Package created: ${DEB_FILE}"
-echo " Size: $(du -h "${DEB_FILE}" | cut -f1)"
-echo "============================================================"
-
-# 输出包信息
-echo ""
-echo "Package info:"
-dpkg-deb --info "${DEB_FILE}" 2>/dev/null || echo "(dpkg-deb info not available)"
+echo "[完成] $(basename "${DEB_FILE}") ($(du -h "${DEB_FILE}" | cut -f1))"

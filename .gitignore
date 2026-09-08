@@ -1,9 +1,13 @@
 # Build artifacts
 build/
+dist/
 output/
 *.deb
+*.deb.sha256
 *.tar.gz
+*.tar.gz.sha256
 *.zip
+*.zip.sha256
 
 # Maven
 target/

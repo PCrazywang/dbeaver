@@ -1,0 +1,20 @@
+#!/bin/sh
+# /usr/bin/dbeaver —— DBeaver 启动包装脚本
+#
+# 为什么是脚本而不是软链接:
+#   Eclipse 启动器在"启动器自身所在目录下的 jre/"里找 JVM, 这一步依赖启动器能
+#   正确定位自身路径。这里直接用绝对路径把 -vm 显式传进去, 于是无论从哪个工作
+#   目录、经由哪个软链接调用, 用的都一定是包内自带的 Temurin JRE, 不会意外落到
+#   系统 Java 上 (UOS 20 上的系统 Java 可能是 8, 跑不了 21.x)。
+#   -vm 必须出现在 -vmargs 之前, 命令行参数排在 dbeaver.ini 的内容之前, 所以
+#   这个顺序是对的。
+set -e
+
+DBEAVER_HOME='@INSTALL_PREFIX@'
+
+if [ ! -x "${DBEAVER_HOME}/jre/bin/java" ]; then
+    echo "dbeaver: 包内 JRE 缺失: ${DBEAVER_HOME}/jre/bin/java" >&2
+    exit 1
+fi
+
+exec "${DBEAVER_HOME}/dbeaver" -vm "${DBEAVER_HOME}/jre/bin/java" "$@"

@@ -1,0 +1,20 @@
+#!/bin/sh
+# /usr/bin/dbeaver 与 .desktop 都是包内文件, 由 dpkg 自己安装和卸载,
+# 这里只刷新几个系统缓存。每一条都容错: 缓存刷不动不该让安装失败。
+set -e
+
+case "$1" in
+    configure)
+        if command -v update-desktop-database >/dev/null 2>&1; then
+            update-desktop-database -q /usr/share/applications || true
+        fi
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+        fi
+        if command -v update-mime-database >/dev/null 2>&1; then
+            update-mime-database /usr/share/mime >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+exit 0

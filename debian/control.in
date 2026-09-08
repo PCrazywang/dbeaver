@@ -1,0 +1,45 @@
+Package: @PACKAGE@
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: @MAINTAINER@
+Installed-Size: @INSTALLED_SIZE@
+Section: devel
+Priority: optional
+Homepage: https://dbeaver.io/
+Depends: libc6 (>= 2.17),
+ libgtk-3-0 (>= 3.20),
+ libglib2.0-0 (>= 2.36),
+ libatk1.0-0,
+ libcairo2,
+ libpango-1.0-0,
+ libpangocairo-1.0-0,
+ libgdk-pixbuf2.0-0 | libgdk-pixbuf-2.0-0,
+ libfontconfig1,
+ libfreetype6,
+ libx11-6,
+ libxext6,
+ libxi6,
+ libxrender1,
+ libxtst6,
+ libxss1,
+ libasound2 | libasound2t64,
+ zlib1g
+Recommends: libwebkit2gtk-4.0-37 | libwebkit2gtk-4.1-0,
+ libgl1 | libgl1-mesa-glx,
+ libglu1-mesa,
+ libsecret-1-0
+Description: Universal database manager and SQL client
+ DBeaver is a free multi-platform database tool for developers,
+ SQL programmers, analysts and DBAs. It supports all popular
+ databases: MySQL, PostgreSQL, SQLite, Oracle, DB2, SQL Server,
+ Sybase, MS Access, Teradata, Firebird, Apache Hive, Phoenix,
+ Presto, etc.
+ .
+ Repackaged from the upstream DBeaver Community Edition release for
+ UOS 20 / Debian 10+ / Ubuntu 18.04+ (@ARCH@), with a bundled Eclipse
+ Temurin 11 JRE so no system Java is required.
+ .
+ Recommends provide libraries SWT loads lazily: WebKit for the embedded
+ browser, GL/GLU for the OpenGL canvas, and libsecret for OS keyring
+ integration. DBeaver starts and works without them; only those specific
+ features need them.
