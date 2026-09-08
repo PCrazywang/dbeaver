@@ -1,4 +1,4 @@
-name: Build DBeaver 21.0.0 (UOS 20)
+name: Build DBeaver 21.0.0 ARM64 (UOS 20)
 
 permissions:
   contents: read
@@ -24,16 +24,6 @@ on:
       - 'README.md'
       - '.gitignore'
   workflow_dispatch:
-    inputs:
-      architectures:
-        description: 目标架构
-        type: choice
-        options:
-          - both
-          - amd64
-          - arm64
-        default: both
-        required: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -45,39 +35,10 @@ env:
   MAX_GLIBC: '2.28'
 
 jobs:
-  configure:
-    name: Configure architecture matrix
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.matrix.outputs.value }}
-    steps:
-      - name: Select architectures
-        id: matrix
-        env:
-          SELECTED: ${{ github.event_name == 'workflow_dispatch' && inputs.architectures || 'both' }}
-        run: |
-          case "$SELECTED" in
-            both)
-              value='{"include":[{"deb_arch":"amd64","db_arch":"x86_64","runner":"ubuntu-22.04"},{"deb_arch":"arm64","db_arch":"aarch64","runner":"ubuntu-22.04-arm"}]}'
-              ;;
-            amd64)
-              value='{"include":[{"deb_arch":"amd64","db_arch":"x86_64","runner":"ubuntu-22.04"}]}'
-              ;;
-            arm64)
-              value='{"include":[{"deb_arch":"arm64","db_arch":"aarch64","runner":"ubuntu-22.04-arm"}]}'
-              ;;
-            *) echo "Unsupported architecture selection: $SELECTED" >&2; exit 2 ;;
-          esac
-          echo "value=$value" >> "$GITHUB_OUTPUT"
-
   build:
-    name: Package ${{ matrix.deb_arch }}
-    needs: configure
-    runs-on: ${{ matrix.runner }}
+    name: Package arm64
+    runs-on: ubuntu-22.04-arm
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.configure.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v6
@@ -96,21 +57,21 @@ jobs:
         run: |
           set -eu
           chmod +x scripts/fetch-and-stage.sh scripts/package-deb.sh
-          bash scripts/fetch-and-stage.sh "${{ matrix.deb_arch }}"
+          bash scripts/fetch-and-stage.sh arm64
           bash scripts/package-deb.sh \
-            "output/dbeaver-ce-${DBEAVER_VERSION}-linux-gtk-${{ matrix.db_arch }}.tar.gz" \
+            "output/dbeaver-ce-${DBEAVER_VERSION}-linux-gtk-aarch64.tar.gz" \
             output
 
       - name: Verify package metadata and payload
         id: meta
         run: |
           set -eu
-          deb="output/dbeaver-ce_${DBEAVER_VERSION}_${{ matrix.deb_arch }}.deb"
-          tarball="output/dbeaver-ce-${DBEAVER_VERSION}-linux-gtk-${{ matrix.db_arch }}.tar.gz"
+          deb="output/dbeaver-ce_${DBEAVER_VERSION}_arm64.deb"
+          tarball="output/dbeaver-ce-${DBEAVER_VERSION}-linux-gtk-aarch64.tar.gz"
           test -f "$deb" && test -f "$tarball"
           test "$(dpkg-deb -f "$deb" Package)" = dbeaver-ce
           test "$(dpkg-deb -f "$deb" Version)" = "$DBEAVER_VERSION"
-          test "$(dpkg-deb -f "$deb" Architecture)" = "${{ matrix.deb_arch }}"
+          test "$(dpkg-deb -f "$deb" Architecture)" = arm64
           file_list="$(mktemp)"
           dpkg-deb --contents "$deb" > "$file_list"
           grep -qE '^[^[:space:]]+[[:space:]].*[[:space:]]\./opt/dbeaver/dbeaver$' "$file_list"
@@ -132,10 +93,10 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: dbeaver-ce-${{ env.DBEAVER_VERSION }}-${{ matrix.deb_arch }}
+          name: dbeaver-ce-${{ env.DBEAVER_VERSION }}-arm64
           path: |
-            output/dbeaver-ce_${{ env.DBEAVER_VERSION }}_${{ matrix.deb_arch }}.deb
-            output/dbeaver-ce_${{ env.DBEAVER_VERSION }}_${{ matrix.deb_arch }}.deb.sha256
+            output/dbeaver-ce_${{ env.DBEAVER_VERSION }}_arm64.deb
+            output/dbeaver-ce_${{ env.DBEAVER_VERSION }}_arm64.deb.sha256
             output/*.tar.gz
             output/*.tar.gz.sha256
           if-no-files-found: error
@@ -143,14 +104,11 @@ jobs:
           retention-days: 14
 
   verify-uos20:
-    name: Verify on Debian 10 / ${{ matrix.deb_arch }}
-    needs: [configure, build]
-    runs-on: ${{ matrix.runner }}
+    name: Verify on Debian 10 / arm64
+    needs: build
+    runs-on: ubuntu-22.04-arm
     container: debian:10-slim
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.configure.outputs.matrix) }}
 
     steps:
       - name: Configure archived Debian 10 repositories
@@ -166,12 +124,12 @@ jobs:
             > /etc/apt/apt.conf.d/99archive
           apt-get -o Acquire::Check-Valid-Until=false update
           apt-get install -y --no-install-recommends ca-certificates file
-          test "$(dpkg --print-architecture)" = "${{ matrix.deb_arch }}"
+          test "$(dpkg --print-architecture)" = arm64
           test "$(getconf GNU_LIBC_VERSION)" = "glibc $MAX_GLIBC"
 
       - uses: actions/download-artifact@v7
         with:
-          name: dbeaver-ce-${{ env.DBEAVER_VERSION }}-${{ matrix.deb_arch }}
+          name: dbeaver-ce-${{ env.DBEAVER_VERSION }}-arm64
           path: dist
 
       - name: Install package and verify runtime links
@@ -180,13 +138,16 @@ jobs:
         run: |
           set -eu
           cd dist
-          deb="dbeaver-ce_${DBEAVER_VERSION}_${{ matrix.deb_arch }}.deb"
+          deb="dbeaver-ce_${DBEAVER_VERSION}_arm64.deb"
           sha256sum --check "$deb.sha256"
-          # Debian 10 的 apt-get 不能可靠地处理本地 .deb 路径；apt 会解析
-          # 包的 Depends 并从已配置的 Debian 10 仓库安装所需运行时库。
-          apt install -y --no-install-recommends "./$deb"
+          # Debian 10 的 apt/apt-get 都不能直接将本地 .deb 路径当成安装目标。
+          # 用 dpkg 安装包本体，再让 apt-get -f install 根据 control 文件补齐 Depends。
+          if ! dpkg -i "./$deb"; then
+            apt-get install -y --no-install-recommends -f
+          fi
+          dpkg-query -W -f='${Status}\n' dbeaver-ce | grep -qx 'install ok installed'
 
-          test "$(dpkg --print-architecture)" = "${{ matrix.deb_arch }}"
+          test "$(dpkg --print-architecture)" = arm64
           test -x /opt/dbeaver/dbeaver
           test -x /opt/dbeaver/jre/bin/java
           test -x /usr/bin/dbeaver
@@ -261,7 +222,7 @@ jobs:
               --title "DBeaver CE ${DBEAVER_VERSION}" \
               --notes "DBeaver CE ${DBEAVER_VERSION} for UOS 20 / Debian 10 ABI.
 
-            Includes amd64 and arm64 packages, a bundled pinned Temurin 11 JRE,
+            Includes an arm64 package, a bundled pinned Temurin 11 JRE,
             SHA-256 files, and Debian 10 runtime verification."
           fi
 
@@ -278,7 +239,7 @@ jobs:
             echo
             echo '| 项目 | 结果 |'
             echo '| --- | --- |'
-            echo '| 双架构装配 | ${{ needs.build.result }} |'
+            echo '| ARM64 装配 | ${{ needs.build.result }} |'
             echo '| Debian 10 / UOS 20 ABI 验证 | ${{ needs.verify-uos20.result }} |'
             echo '| 输入 | 官方 nojdk 包 + 固定 Temurin 11 JRE（均校验 SHA-256） |'
           } >> "$GITHUB_STEP_SUMMARY"
