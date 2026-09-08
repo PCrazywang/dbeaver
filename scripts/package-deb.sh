@@ -170,11 +170,17 @@ find "${STAGING_DIR}" -type f -exec chmod go-w {} +
 DEB_FILE="${OUTPUT_DIR}/dbeaver-ce_${DBEAVER_VERSION}_${DEB_ARCH}.deb"
 echo "[打包] ${DEB_FILE}"
 rm -f "${DEB_FILE}"
-dpkg-deb --build --root-owner-group "${STAGING_DIR}" "${DEB_FILE}"
+# Debian 10 的 dpkg-deb 不支持 control.tar.zst；显式使用 gzip，保证 UOS 20 /
+# Debian 10 可以安装由新版 Ubuntu runner 构建的包。
+dpkg-deb --build --root-owner-group --compression=gzip "${STAGING_DIR}" "${DEB_FILE}"
 dpkg-deb --info "${DEB_FILE}" >/dev/null
 CONTENTS_FILE="$(mktemp "${TMPDIR:-/tmp}/dbeaver-contents-XXXXXX")"
+ARCHIVE_FILE="$(mktemp "${TMPDIR:-/tmp}/dbeaver-archive-XXXXXX")"
 dpkg-deb --contents "${DEB_FILE}" > "${CONTENTS_FILE}"
+ar t "${DEB_FILE}" > "${ARCHIVE_FILE}"
+grep -qx 'control.tar.gz' "${ARCHIVE_FILE}"
+grep -qx 'data.tar.gz' "${ARCHIVE_FILE}"
 grep -qE '^[-[:alnum:]]+[[:space:]].*[[:space:]][.]/usr/bin/dbeaver$' "${CONTENTS_FILE}"
-rm -f "${CONTENTS_FILE}"
+rm -f "${CONTENTS_FILE}" "${ARCHIVE_FILE}"
 
 echo "[完成] $(basename "${DEB_FILE}") ($(du -h "${DEB_FILE}" | cut -f1))"

@@ -72,6 +72,9 @@ jobs:
           test "$(dpkg-deb -f "$deb" Package)" = dbeaver-ce
           test "$(dpkg-deb -f "$deb" Version)" = "$DBEAVER_VERSION"
           test "$(dpkg-deb -f "$deb" Architecture)" = arm64
+          archive_members="$(ar t "$deb")"
+          printf '%s\n' "$archive_members" | grep -qx 'control.tar.gz'
+          printf '%s\n' "$archive_members" | grep -qx 'data.tar.gz'
           file_list="$(mktemp)"
           dpkg-deb --contents "$deb" > "$file_list"
           grep -qE '^[^[:space:]]+[[:space:]].*[[:space:]]\./opt/dbeaver/dbeaver$' "$file_list"
