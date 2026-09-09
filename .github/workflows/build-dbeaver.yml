@@ -162,17 +162,31 @@ jobs:
           # DBeaver 本身是 GUI，不在无 X server 的 CI 里启动；但检查所有 ELF
           # 启动器和 JNI 库，确保 Ubuntu 20.04 用户态中没有未解析的共享库。
           missing=0
+          jre_library_path="/opt/dbeaver/jre/lib:/opt/dbeaver/jre/lib/server:/opt/dbeaver/jre/lib/jli"
           while IFS= read -r -d '' elf; do
             description="$(file "$elf")"
             if [[ "$description" == *ELF* ]]; then
               links_file="$(mktemp)"
-              if ! ldd "$elf" > "$links_file" 2>&1; then
-                echo "ldd failed for $elf" >&2
-                cat "$links_file" >&2
-                rm -f "$links_file"
-                missing=1
-                continue
-              fi
+              case "$elf" in
+                /opt/dbeaver/jre/*)
+                  if ! LD_LIBRARY_PATH="$jre_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$elf" > "$links_file" 2>&1; then
+                    echo "ldd failed for $elf" >&2
+                    cat "$links_file" >&2
+                    rm -f "$links_file"
+                    missing=1
+                    continue
+                  fi
+                  ;;
+                *)
+                  if ! ldd "$elf" > "$links_file" 2>&1; then
+                    echo "ldd failed for $elf" >&2
+                    cat "$links_file" >&2
+                    rm -f "$links_file"
+                    missing=1
+                    continue
+                  fi
+                  ;;
+              esac
               if grep -Eq "not found|undefined symbol|version [^ ]+ not found" "$links_file"; then
                 echo "Unresolved dependencies, symbols, or symbol versions in $elf" >&2
                 cat "$links_file" >&2
