@@ -170,8 +170,8 @@ find "${STAGING_DIR}" -type f -exec chmod go-w {} +
 DEB_FILE="${OUTPUT_DIR}/dbeaver-ce_${DBEAVER_VERSION}_${DEB_ARCH}.deb"
 echo "[打包] ${DEB_FILE}"
 rm -f "${DEB_FILE}"
-# Debian 10 的 dpkg-deb 不支持 control.tar.zst；显式使用 gzip，保证 UOS 20 /
-# Debian 10 可以安装由新版 Ubuntu runner 构建的包。
+# 旧版 dpkg-deb 不支持 control.tar.zst；显式使用 gzip，保证由新版 Ubuntu
+# runner 构建的包仍可被较旧的 Debian-family 打包工具读取。
 dpkg-deb --build --root-owner-group --compression=gzip "${STAGING_DIR}" "${DEB_FILE}"
 dpkg-deb --info "${DEB_FILE}" >/dev/null
 CONTENTS_FILE="$(mktemp "${TMPDIR:-/tmp}/dbeaver-contents-XXXXXX")"

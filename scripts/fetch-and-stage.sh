@@ -23,6 +23,12 @@ DBEAVER_VERSION="${DBEAVER_VERSION:-21.0.0}"
 # Temurin 发布号。文件名里 '+' 写成 '_', release tag 里要 URL 编码成 %2B,
 # 两种写法都从这一个变量派生, 不会出现两处版本号打架。
 TEMURIN_RELEASE="${TEMURIN_RELEASE:-11.0.32.1+1}"
+# UOS 20 兼容性由 ELF 版本需求静态门禁，而不是由任一 Linux 容器的用户态
+# 版本替代。3.4.25 对应 GCC 8 的 libstdc++ ABI 上限。
+MAX_GLIBC="${MAX_GLIBC:-2.28}"
+MAX_GLIBCXX="${MAX_GLIBCXX:-3.4.25}"
+REQUIRED_GLIBC=""
+REQUIRED_GLIBCXX=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -38,6 +44,8 @@ usage() {
 环境变量:
   DBEAVER_VERSION   DBeaver 版本 (默认 ${DBEAVER_VERSION})
   TEMURIN_RELEASE   Temurin JRE 发布号 (默认 ${TEMURIN_RELEASE})
+  MAX_GLIBC         允许的最高 GLIBC 版本需求 (默认 ${MAX_GLIBC})
+  MAX_GLIBCXX       允许的最高 GLIBCXX 版本需求 (默认 ${MAX_GLIBCXX})
   OUTPUT_DIR        产物目录 (默认 <repo>/output)
   WORK_DIR          工作目录 (默认 <repo>/build)
 EOF
@@ -177,6 +185,60 @@ for frag in "org.eclipse.swt.gtk.linux.${DB_ARCH}_" "org.eclipse.equinox.launche
 done
 echo "  SWT / 启动器 fragment: ${DB_ARCH} 已就位"
 
+# 只从 readelf 的 Version needs section 读取导入版本，避免把自身导出的版本
+# 符号误作运行时要求。所有原生文件都纳入检查，包括 JRE、SWT 和 JNI 库。
+verify_legacy_abi() {
+    local needs_file elf scanned=0 forbidden=0
+    needs_file="$(mktemp "${TMPDIR:-/tmp}/dbeaver-version-needs-XXXXXX")"
+    while IFS= read -r -d '' elf; do
+        if ! readelf -h "${elf}" >/dev/null 2>&1; then
+            continue
+        fi
+        scanned=$((scanned + 1))
+        if ! readelf --version-info --wide "${elf}" 2>/dev/null >> "${needs_file}"; then
+            rm -f "${needs_file}"
+            echo "错误: 无法读取 ELF 的版本需求: ${elf}" >&2
+            exit 1
+        fi
+        if readelf --dyn-syms --wide "${elf}" 2>/dev/null | grep -q '__libc_single_threaded'; then
+            forbidden=1
+            echo "错误: ${elf} 引用了 UOS 20 基线不提供的 __libc_single_threaded" >&2
+        fi
+    done < <(find "${APP}" -type f -print0)
+
+    # Version needs 与 Version definition 同时使用 "Name: GLIBC_*"，仅保留
+    # needs section 之后的版本名称，避免把库自身导出的版本计入运行时需求。
+    REQUIRED_GLIBC="$(awk '
+        /Version needs section/ { needs=1; next }
+        /Version (definition|symbols) section/ { needs=0 }
+        needs && /Name: GLIBC_[0-9][0-9.]*/ {
+            for (i = 1; i <= NF; i++) if ($i == "Name:") print $(i + 1)
+        }
+    ' "${needs_file}" | sed 's/GLIBC_//' | sort -Vu | tail -n 1 || true)"
+    REQUIRED_GLIBCXX="$(awk '
+        /Version needs section/ { needs=1; next }
+        /Version (definition|symbols) section/ { needs=0 }
+        needs && /Name: GLIBCXX_[0-9][0-9.]*/ {
+            for (i = 1; i <= NF; i++) if ($i == "Name:") print $(i + 1)
+        }
+    ' "${needs_file}" | sed 's/GLIBCXX_//' | sort -Vu | tail -n 1 || true)"
+    rm -f "${needs_file}"
+    echo "  ABI: 扫描 ${scanned} 个 ELF；GLIBC_${REQUIRED_GLIBC:-<none>} / GLIBCXX_${REQUIRED_GLIBCXX:-<none>}（上限 ${MAX_GLIBC} / ${MAX_GLIBCXX}）"
+    [ "${scanned}" -gt 0 ] || { echo "错误: 未找到可检查的 ELF 文件" >&2; exit 1; }
+    [ "${forbidden}" -eq 0 ] || exit 1
+    if [ -n "${REQUIRED_GLIBC}" ] && [ "$(printf '%s\n' "${MAX_GLIBC}" "${REQUIRED_GLIBC}" | sort -V | tail -n 1)" != "${MAX_GLIBC}" ]; then
+        echo "错误: 产物要求 GLIBC_${REQUIRED_GLIBC}，超过上限 ${MAX_GLIBC}" >&2
+        exit 1
+    fi
+    if [ -n "${REQUIRED_GLIBCXX}" ] && [ "$(printf '%s\n' "${MAX_GLIBCXX}" "${REQUIRED_GLIBCXX}" | sort -V | tail -n 1)" != "${MAX_GLIBCXX}" ]; then
+        echo "错误: 产物要求 GLIBCXX_${REQUIRED_GLIBCXX}，超过上限 ${MAX_GLIBCXX}" >&2
+        exit 1
+    fi
+}
+
+command -v readelf >/dev/null 2>&1 || { echo "错误: ABI 校验需要 readelf" >&2; exit 1; }
+verify_legacy_abi
+
 JRE_VERSION_LINE="openjdk version \"${TEMURIN_RELEASE%%+*}\""
 # 只有在本机架构与目标一致时才执行 JRE，确认固定版本确实可启动；写入溯源文件的
 # 版本字符串由 TEMURIN_RELEASE 派生，避免不同构建主机造成内容差异。
@@ -210,6 +272,10 @@ jre=Temurin ${TEMURIN_RELEASE} (${JRE_ARCH}, sha256 已固定)
 jre_source_url=${JRE_URL}
 jre_version=${JRE_VERSION_LINE}
 target_arch=${DB_ARCH}
+max_glibc_ceiling=${MAX_GLIBC}
+max_glibcxx_ceiling=${MAX_GLIBCXX}
+required_glibc=${REQUIRED_GLIBC:-none}
+required_glibcxx=${REQUIRED_GLIBCXX:-none}
 install_prefix=${INSTALL_PREFIX:-/opt/dbeaver}
 git_commit=${GITHUB_SHA:-$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)}
 EOF

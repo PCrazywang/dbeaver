@@ -36,7 +36,7 @@ Description: Universal database manager and SQL client
  Presto, etc.
  .
  Repackaged from the upstream DBeaver Community Edition release for
- UOS 20 / Debian 10+ / Ubuntu 18.04+ (@ARCH@), with a bundled Eclipse
+ UOS 20 ABI-targeted ARM64 systems and Ubuntu 18.04+ (@ARCH@), with a bundled Eclipse
  Temurin 11 JRE so no system Java is required.
  .
  Recommends provide libraries SWT loads lazily: WebKit for the embedded

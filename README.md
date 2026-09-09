@@ -1,104 +1,74 @@
-# DBeaver 21.0.0 双架构打包
+# DBeaver 21.0.0 ARM64 打包
 
-本项目用 GitHub Actions 生成适用于 **统信 UOS 20 / Debian 10 ABI（glibc 2.28）** 的 DBeaver Community Edition 21.0.0：
+本项目通过 GitHub Actions 生成 DBeaver Community Edition 21.0.0 的 **ARM64** 绿色包和 Debian 包：
 
-| 架构 | 绿色包 | Debian 包 |
-| --- | --- | --- |
-| amd64 / x86-64 | `dbeaver-ce-21.0.0-linux-gtk-x86_64.tar.gz` | `dbeaver-ce_21.0.0_amd64.deb` |
-| arm64 / aarch64（鲲鹏、飞腾） | `dbeaver-ce-21.0.0-linux-gtk-aarch64.tar.gz` | `dbeaver-ce_21.0.0_arm64.deb` |
+| 产物 | 文件名 |
+| --- | --- |
+| 绿色包 | `dbeaver-ce-21.0.0-linux-gtk-aarch64.tar.gz` |
+| Debian 包 | `dbeaver-ce_21.0.0_arm64.deb` |
 
-每个产物都有同名 `.sha256` 文件，包内包含 `BUILD-ENVIRONMENT.txt`。Actions artifact 保留 14 天；推送 `v21.0.0` 标签时，Debian 10 验证通过的双架构产物还会上传到 GitHub Release。
+产物各有同名 `.sha256` 校验文件，且安装树内含 `BUILD-ENVIRONMENT.txt`。构建产物保留 14 天；推送 `v21.0.0` 标签时，只有构建与 Ubuntu 20.04 用户态冒烟均通过才会发布 Release。
 
-## 为什么不再用 Maven/Tycho 从源码构建
+## 构建策略与兼容性范围
 
-以前的流程会克隆 21.0.0 源码，再用 Tycho 2.0.0 交叉构建。这条链路现在不可复现：
+DBeaver 21.0.0 的旧 Tycho 源码构建链已无法复现：其 p2 仓库已下线，旧 Tycho 也与当前 Maven 不兼容。官方仍提供 ARM64 `nojdk` 二进制，因此 CI 采用更可复现的流程：下载固定校验和的官方 `nojdk` 包，植入固定版本 Temurin 11 JRE，再打包为 `.tar.gz` 与 `.deb`。
 
-1. 21.0.0 的 `local-p2-repo.url` 指向 `https://dbeaver.io/eclipse-repo`，该仓库已经下线（HTTP 404）。
-2. 换成较新版本的 p2 仓库并不等价：其中的 bundle 版本无法满足 21.0.0 的 OSGi 约束，因此会连续出现目标平台依赖解析错误。
-3. Tycho 2.0.0 与当前 GitHub runner 自带的 Maven 3.9.x 不兼容。
-4. DBeaver 官方已经发布 21.0.0 的 `x86_64` 和 `aarch64` **nojdk** 二进制，不需要重新编译或交叉构建 SWT 原生部分。
+所有外部输入都必须在 [checksums/inputs.sha256](checksums/inputs.sha256) 中预先固定；下载后校验失败或缺条目即停止。它是“验证并重新打包官方发布物”的流程，不是 DBeaver 源码编译流程。
 
-现在的工作流直接下载两个官方 nojdk 包，校验仓库中固定的 SHA-256，然后植入固定版本的 Eclipse Temurin 11 JRE。这样既保留官方原生启动器和 SWT fragment，也保证两个架构使用相同 Java 版本。所有网络输入都列在 [checksums/inputs.sha256](checksums/inputs.sha256)，校验失败或缺少条目时立即停止。
-
-> 这是一条“验证并重新打包官方发布物”的流水线，而不是源码编译流水线。
+UOS 20 兼容性由完整安装树的静态 ELF 版本需求门禁表示：`GLIBC_ <= 2.28`、`GLIBCXX_ <= 3.4.25`，并拒绝 `__libc_single_threaded`。CI 也会在 Ubuntu 20.04 ARM64 用户态中安装 `.deb`、检查动态链接和运行包内 Java；该容器检查不是 UOS 运行时验证。发布候选包仍须在真实 UOS 20 ARM64 环境实际安装、启动并完成业务冒烟后，才能声明运行时支持。
 
 ## CI 流程
 
-[build-dbeaver.yml](.github/workflows/build-dbeaver.yml) 对 amd64 和 arm64 分别执行：
+[build-dbeaver.yml](.github/workflows/build-dbeaver.yml) 只构建 ARM64：
 
-1. 在架构匹配的 GitHub runner 上下载并验证 DBeaver 与 Temurin JRE。
-2. 验证 ELF 机器类型，以及 SWT、Eclipse launcher fragment 架构。
-3. 生成绿色 tar.gz 和 Debian 包，并生成 SHA-256。
-4. 在同架构 `debian:10-slim` 容器中安装 `.deb`：确认 glibc 恰为 2.28、运行包内 Java，并逐个检查所有 ELF/JNI 文件是否有 `ldd not found`。
-5. `v*` 标签只在标签版本与 `DBEAVER_VERSION` 一致时发布 Release。
-
-手动运行时，`architectures` 可选 `both`、`amd64` 或 `arm64`。普通 push、PR 和标签总是构建双架构。为避免未验证的产物，旧流程中的 tmate 调试和从 CI 直接 SSH 部署均不在主工作流内；需要部署时下载验证后的 artifact，再使用 `scripts/deploy-remote.sh`。
+1. 在 `ubuntu-22.04-arm` runner 下载并校验官方 DBeaver 与 Temurin 输入。
+2. 检查启动器、JRE、SWT 与 Eclipse launcher fragment 的 ARM64 身份。
+3. 扫描完整装配树中每个 ELF 的版本需求，执行 UOS ABI 上限门禁。
+4. 生成绿色包、gzip `control.tar.gz` / `data.tar.gz` 的 Debian 包及 SHA-256 文件。
+5. 在 Ubuntu 20.04 ARM64 用户态安装 `.deb`，检查安装内容、包内 Java 和所有 ELF/JNI 动态链接。
+6. `v*` 标签仅在版本匹配、构建和 Ubuntu 用户态冒烟通过时发布 Release。
 
 ## 本地生成
 
-需要 Linux、`curl`、`tar`、`file`/`readelf`、`dpkg-deb` 和网络访问：
+需要 Linux、`curl`、`tar`、`readelf`、`file`、`dpkg-deb` 和网络访问：
 
 ```bash
-# 单架构绿色包
-bash scripts/fetch-and-stage.sh amd64
 bash scripts/fetch-and-stage.sh arm64
-
-# 转换为 Debian 包
 bash scripts/package-deb.sh \
-  output/dbeaver-ce-21.0.0-linux-gtk-x86_64.tar.gz
-bash scripts/package-deb.sh \
-  output/dbeaver-ce-21.0.0-linux-gtk-aarch64.tar.gz
-
-# 兼容入口：默认生成双架构绿色包
-bash scripts/build.sh
-# 或 ARCHITECTURES=arm64 bash scripts/build.sh
+  output/dbeaver-ce-21.0.0-linux-gtk-aarch64.tar.gz \
+  output
 ```
 
-可覆盖的主要环境变量：
+主要可覆盖变量：
 
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `DBEAVER_VERSION` | `21.0.0` | DBeaver 版本；升级时还必须更新校验和 |
+| `DBEAVER_VERSION` | `21.0.0` | DBeaver 版本；升级时必须同步更新输入校验和 |
 | `TEMURIN_RELEASE` | `11.0.32.1+1` | 植入的 Temurin 11 JRE 发布号 |
+| `MAX_GLIBC` | `2.28` | 最大允许 GLIBC 版本需求 |
+| `MAX_GLIBCXX` | `3.4.25` | 最大允许 GLIBCXX 版本需求 |
 | `WORK_DIR` | `<repo>/build` | 下载缓存和装配目录 |
 | `OUTPUT_DIR` | `<repo>/output` | 输出目录 |
 | `INSTALL_PREFIX` | `/opt/dbeaver` | Debian 包内安装路径 |
-| `MAINTAINER` | `DBeaver Builder <builder@local>` | Debian 包维护者字段 |
 
 ## 安装与使用
 
 ```bash
-# 按机器架构选择一个包
-sudo apt install ./dbeaver-ce_21.0.0_amd64.deb
-# 或
 sudo apt install ./dbeaver-ce_21.0.0_arm64.deb
-
 dbeaver &
 ```
 
-安装内容：
+安装内容：应用及包内 JRE 在 `/opt/dbeaver/`，启动包装脚本位于 `/usr/bin/dbeaver`，桌面入口位于 `/usr/share/applications/dbeaver.desktop`。包装脚本会明确向 Eclipse 启动器传入 `/opt/dbeaver/jre/bin/java`，不依赖系统 Java。
 
-- 应用与包内 JRE：`/opt/dbeaver/`
-- 启动包装脚本：`/usr/bin/dbeaver`
-- 桌面入口：`/usr/share/applications/dbeaver.desktop`
-
-`/usr/bin/dbeaver` 会显式把 `/opt/dbeaver/jre/bin/java` 传给 Eclipse 启动器，不依赖机器上的系统 Java。`.deb` 的 Depends 包含启动器、SWT/GTK native 和 JRE 直接链接的系统库；WebKit、OpenGL/GLU 和 libsecret 属于特定功能所需的 Recommends。
-
-绿色包解压后同样带有 `dbeaver/jre/`：
+绿色包同样包含 `dbeaver/jre/`：
 
 ```bash
-tar -xzf dbeaver-ce-21.0.0-linux-gtk-x86_64.tar.gz
+tar -xzf dbeaver-ce-21.0.0-linux-gtk-aarch64.tar.gz
 ./dbeaver/dbeaver &
 ```
 
 ## 升级版本
 
-升级不能只改一个版本字符串，至少要同时完成：
+升级至少需要：确认上游仍有 ARM64 `nojdk` 包；同步修改版本和固定 SHA-256；确认 DBeaver 支持所选 Java 主版本；在 CI 中通过架构、ABI、包布局和 Ubuntu 用户态验证；最后在真实 UOS 20 ARM64 环境完成安装及运行验证。
 
-1. 确认目标版本仍提供对应的 `*-nojdk.tar.gz` 双架构文件。
-2. 修改 workflow 与脚本使用的 DBeaver/Temurin 版本。
-3. 从可信上游核实四个输入文件的 SHA-256，并更新 `checksums/inputs.sha256`。
-4. 确认目标 DBeaver 支持所选 Java 主版本。
-5. 让双架构 Debian 10 runtime job 全部通过后再发布。
-
-DBeaver 21.0.0 发布于 2021 年，已经很旧。若不是为了兼容既有环境，应优先使用仍获安全修复的新版本；继续使用此版本时，也应评估它所含数据库驱动和第三方 bundle 的已知漏洞。
+DBeaver 21.0.0 发布于 2021 年，已非常陈旧。除非必须兼容既有环境，否则应优先使用仍有安全修复的版本，并评估其中数据库驱动与第三方 bundle 的已知漏洞。
