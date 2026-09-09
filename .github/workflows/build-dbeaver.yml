@@ -117,6 +117,10 @@ jobs:
     container: ubuntu:20.04
     timeout-minutes: 30
 
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - name: Install Ubuntu 20.04 runtime tools
         env:
