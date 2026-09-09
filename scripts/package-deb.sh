@@ -170,9 +170,9 @@ find "${STAGING_DIR}" -type f -exec chmod go-w {} +
 DEB_FILE="${OUTPUT_DIR}/dbeaver-ce_${DBEAVER_VERSION}_${DEB_ARCH}.deb"
 echo "[打包] ${DEB_FILE}"
 rm -f "${DEB_FILE}"
-# 旧版 dpkg-deb 不支持 control.tar.zst；显式使用 gzip，保证由新版 Ubuntu
-# runner 构建的包仍可被较旧的 Debian-family 打包工具读取。
-dpkg-deb --build --root-owner-group --compression=gzip "${STAGING_DIR}" "${DEB_FILE}"
+# 旧版 dpkg-deb 不支持 control.tar.zst；使用广泛支持的 -Zgzip 短选项，
+# 保证由新版 Ubuntu runner 构建的包仍可被较旧的 Debian-family 打包工具读取。
+dpkg-deb -Zgzip --build --root-owner-group "${STAGING_DIR}" "${DEB_FILE}"
 dpkg-deb --info "${DEB_FILE}" >/dev/null
 CONTENTS_FILE="$(mktemp "${TMPDIR:-/tmp}/dbeaver-contents-XXXXXX")"
 ARCHIVE_FILE="$(mktemp "${TMPDIR:-/tmp}/dbeaver-archive-XXXXXX")"
