@@ -197,8 +197,9 @@ jobs:
           done < <(find /opt/dbeaver -type f -print0)
           test "$missing" -eq 0
 
-          grep -F 'Exec=/usr/bin/dbeaver %u' /usr/share/applications/dbeaver.desktop
-          grep -F '/opt/dbeaver/jre/bin/java' /usr/bin/dbeaver
+          grep -Fx 'Exec=/usr/bin/dbeaver %u' /usr/share/applications/dbeaver.desktop
+          grep -Fx "DBEAVER_HOME='/opt/dbeaver'" /usr/bin/dbeaver
+          grep -Fx 'exec "${DBEAVER_HOME}/dbeaver" -vm "${DBEAVER_HOME}/jre/bin/java" "$@"' /usr/bin/dbeaver
           dpkg-query -W -f='Status Architecture Version\n' dbeaver-ce
           cat /opt/dbeaver/BUILD-ENVIRONMENT.txt
 
