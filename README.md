@@ -7,7 +7,7 @@
 | 绿色包 | `dbeaver-ce-21.0.0-linux-gtk-aarch64.tar.gz` |
 | Debian 包 | `dbeaver-ce_21.0.0_arm64.deb` |
 
-产物各有同名 `.sha256` 校验文件，且安装树内含 `BUILD-ENVIRONMENT.txt`。构建产物保留 14 天；推送 `v21.0.0` 标签时，只有构建与 Ubuntu 20.04 用户态冒烟均通过才会发布 Release。
+产物各有同名 `.sha256` 校验文件，且安装树内含 `BUILD-ENVIRONMENT.txt`。构建产物保留 14 天；推送 `v21.0.0` 标签时，只有构建与 Ubuntu 20.04 用户态冒烟均通过才会创建 Release。Release 使用 GitHub 自动生成的说明，且只会上传本文列出的 4 个预期资产；若同名 Release 已存在，工作流会失败而不会覆盖已发布文件。
 
 ## 构建策略与兼容性范围
 
@@ -26,7 +26,7 @@ UOS 20 兼容性由完整安装树的静态 ELF 版本需求门禁表示：`GLIB
 3. 扫描完整装配树中每个 ELF 的版本需求，执行 UOS ABI 上限门禁。
 4. 生成绿色包、gzip `control.tar.gz` / `data.tar.gz` 的 Debian 包及 SHA-256 文件。
 5. 在 Ubuntu 20.04 ARM64 用户态安装 `.deb`，检查安装内容、包内 Java 和所有 ELF/JNI 动态链接。
-6. `v*` 标签仅在版本匹配、构建和 Ubuntu 用户态冒烟通过时发布 Release。
+6. `v*` 标签仅在版本匹配、构建和 Ubuntu 用户态冒烟通过时创建 Release；Release 使用 GitHub 自动生成的说明，并只包含本文列出的 4 个预期文件。
 
 ## 本地生成
 

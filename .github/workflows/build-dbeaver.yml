@@ -223,29 +223,65 @@ jobs:
 
       - uses: actions/download-artifact@v7
         with:
-          pattern: dbeaver-ce-${{ env.DBEAVER_VERSION }}-*
+          name: dbeaver-ce-${{ env.DBEAVER_VERSION }}-arm64
           path: dist
-          merge-multiple: true
 
-      - name: Create or update GitHub Release
+      - name: Validate release assets
+        env:
+          DBEAVER_RELEASE_VERSION: ${{ env.DBEAVER_VERSION }}
+        run: |
+          set -eu
+          assets=(
+            "dist/dbeaver-ce_${DBEAVER_RELEASE_VERSION}_arm64.deb"
+            "dist/dbeaver-ce_${DBEAVER_RELEASE_VERSION}_arm64.deb.sha256"
+            "dist/dbeaver-ce-${DBEAVER_RELEASE_VERSION}-linux-gtk-aarch64.tar.gz"
+            "dist/dbeaver-ce-${DBEAVER_RELEASE_VERSION}-linux-gtk-aarch64.tar.gz.sha256"
+          )
+          for asset in "${assets[@]}"; do
+            test -f "$asset"
+          done
+          printf '%s\n' "${assets[@]}"
+
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
+          DBEAVER_RELEASE_VERSION: ${{ env.DBEAVER_VERSION }}
         run: |
           set -eu
-          ls -lh dist
+          assets=(
+            "dist/dbeaver-ce_${DBEAVER_RELEASE_VERSION}_arm64.deb"
+            "dist/dbeaver-ce_${DBEAVER_RELEASE_VERSION}_arm64.deb.sha256"
+            "dist/dbeaver-ce-${DBEAVER_RELEASE_VERSION}-linux-gtk-aarch64.tar.gz"
+            "dist/dbeaver-ce-${DBEAVER_RELEASE_VERSION}-linux-gtk-aarch64.tar.gz.sha256"
+          )
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" dist/* --clobber
-          else
-            gh release create "$RELEASE_TAG" dist/* \
-              --title "DBeaver CE ${DBEAVER_VERSION}" \
-              --notes "DBeaver CE ${DBEAVER_VERSION} ARM64 package targeting the UOS 20 ABI baseline.
-
-            Includes a pinned official no-JDK input, a bundled Temurin 11 JRE,
-            SHA-256 files, static ELF ABI ceiling checks, and an Ubuntu 20.04 userspace smoke test.
-            Test the release candidate on real UOS 20 ARM64 before claiming runtime support."
+            echo "Release $RELEASE_TAG already exists; refusing to overwrite published assets." >&2
+            exit 1
           fi
+          gh release create "$RELEASE_TAG" "${assets[@]}" \
+            --title "DBeaver CE ${DBEAVER_RELEASE_VERSION}" \
+            --generate-notes
+
+      - name: Validate generated release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          DBEAVER_RELEASE_VERSION: ${{ env.DBEAVER_VERSION }}
+        run: |
+          set -eu
+          expected_assets=(
+            "dbeaver-ce_${DBEAVER_RELEASE_VERSION}_arm64.deb"
+            "dbeaver-ce_${DBEAVER_RELEASE_VERSION}_arm64.deb.sha256"
+            "dbeaver-ce-${DBEAVER_RELEASE_VERSION}-linux-gtk-aarch64.tar.gz"
+            "dbeaver-ce-${DBEAVER_RELEASE_VERSION}-linux-gtk-aarch64.tar.gz.sha256"
+          )
+          actual_assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
+          for asset in "${expected_assets[@]}"; do
+            printf '%s\n' "$actual_assets" | grep -Fx -- "$asset" >/dev/null
+          done
 
   summary:
     name: Build summary
